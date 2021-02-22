@@ -22,21 +22,25 @@ import (
 	"flag"
 	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruiseclient "github.com/openkruise/kruise/pkg/client"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	revisioncontrol "github.com/openkruise/kruise/pkg/controller/cloneset/revision"
 	scalecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/scale"
 	updatecontrol "github.com/openkruise/kruise/pkg/controller/cloneset/update"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/util"
+	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
-	"github.com/openkruise/kruise/pkg/util/gate"
 	historyutil "github.com/openkruise/kruise/pkg/util/history"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
+	"github.com/openkruise/kruise/pkg/util/refmanager"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -59,15 +63,12 @@ func init() {
 
 var (
 	concurrentReconciles = 3
-
-	scaleExpectations  = expectations.NewScaleExpectations()
-	updateExpectations = expectations.NewUpdateExpectations(clonesetutils.GetPodRevision)
 )
 
 // Add creates a new CloneSet Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !gate.ResourceEnabled(&appsv1alpha1.CloneSet{}) {
+	if !utildiscovery.DiscoverGVK(clonesetutils.ControllerKind) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -76,23 +77,24 @@ func Add(mgr manager.Manager) error {
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 	_ = fieldindex.RegisterFieldIndexes(mgr.GetCache())
-	recorder := mgr.GetRecorder("cloneset-controller")
-	if cli := kruiseclient.GetGenericClient(); cli != nil {
+	recorder := mgr.GetEventRecorderFor("cloneset-controller")
+	if cli := kruiseclient.GetGenericClientWithName("cloneset-controller"); cli != nil {
 		eventBroadcaster := record.NewBroadcaster()
 		eventBroadcaster.StartLogging(klog.Infof)
 		eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: cli.KubeClient.CoreV1().Events("")})
 		recorder = eventBroadcaster.NewRecorder(mgr.GetScheme(), v1.EventSource{Component: "cloneset-controller"})
 	}
+	cli := util.NewClientFromManager(mgr, "cloneset-controller")
 	reconciler := &ReconcileCloneSet{
-		Client:            mgr.GetClient(),
+		Client:            cli,
 		scheme:            mgr.GetScheme(),
 		recorder:          recorder,
-		statusUpdater:     newStatusUpdater(mgr.GetClient()),
-		controllerHistory: historyutil.NewHistory(mgr.GetClient()),
+		statusUpdater:     newStatusUpdater(cli),
+		controllerHistory: historyutil.NewHistory(cli),
 		revisionControl:   revisioncontrol.NewRevisionControl(),
 	}
-	reconciler.scaleControl = scalecontrol.New(mgr.GetClient(), reconciler.recorder, scaleExpectations)
-	reconciler.updateControl = updatecontrol.New(mgr.GetClient(), reconciler.recorder, scaleExpectations, updateExpectations)
+	reconciler.scaleControl = scalecontrol.New(cli, reconciler.recorder)
+	reconciler.updateControl = updatecontrol.New(cli, reconciler.recorder)
 	reconciler.reconcileFunc = reconciler.doReconcile
 	return reconciler
 }
@@ -100,7 +102,9 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New("cloneset-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: concurrentReconciles})
+	c, err := controller.New("cloneset-controller", mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles,
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
 	if err != nil {
 		return err
 	}
@@ -122,7 +126,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to Pod
-	err = c.Watch(&source.Kind{Type: &v1.Pod{}}, &podEventHandler{Reader: mgr.GetClient()})
+	err = c.Watch(&source.Kind{Type: &v1.Pod{}}, &podEventHandler{Reader: mgr.GetCache()})
 	if err != nil {
 		return err
 	}
@@ -152,8 +156,6 @@ type ReconcileCloneSet struct {
 	updateControl     updatecontrol.Interface
 }
 
-// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read
-// and what is in the CloneSet.Spec
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create;update;patch;delete
@@ -161,6 +163,9 @@ type ReconcileCloneSet struct {
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=clonesets/status,verbs=get;update;patch
+
+// Reconcile reads that state of the cluster for a CloneSet object and makes changes based on the state read
+// and what is in the CloneSet.Spec
 func (r *ReconcileCloneSet) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	return r.reconcileFunc(request)
 }
@@ -187,8 +192,8 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
 			klog.V(3).Infof("CloneSet %s has been deleted.", request)
-			scaleExpectations.DeleteExpectations(request.String())
-			updateExpectations.DeleteExpectations(request.String())
+			clonesetutils.ScaleExpectations.DeleteExpectations(request.String())
+			clonesetutils.UpdateExpectations.DeleteExpectations(request.String())
 			return reconcile.Result{}, nil
 		}
 		return reconcile.Result{}, err
@@ -208,13 +213,23 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 	}
 
 	// If scaling expectations have not satisfied yet, just skip this reconcile.
-	if scaleSatisfied, scaleDirtyPods := scaleExpectations.SatisfiedExpectations(request.String()); !scaleSatisfied {
+	if scaleSatisfied, unsatisfiedDuration, scaleDirtyPods := clonesetutils.ScaleExpectations.SatisfiedExpectations(request.String()); !scaleSatisfied {
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			klog.Warningf("Expectation unsatisfied overtime for %v, scaleDirtyPods=%v, overtime=%v", request.String(), scaleDirtyPods, unsatisfiedDuration)
+			return reconcile.Result{}, nil
+		}
 		klog.V(4).Infof("Not satisfied scale for %v, scaleDirtyPods=%v", request.String(), scaleDirtyPods)
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
 	}
 
 	// list all active Pods and PVCs belongs to cs
 	filteredPods, filteredPVCs, err := r.getOwnedResource(instance)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
+	//release Pods ownerRef
+	filteredPods, err = r.claimPods(instance, filteredPods)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
@@ -234,16 +249,32 @@ func (r *ReconcileCloneSet) doReconcile(request reconcile.Request) (res reconcil
 
 	// Refresh update expectations
 	for _, pod := range filteredPods {
-		updateExpectations.ObserveUpdated(request.String(), updateRevision.Name, pod)
+		clonesetutils.UpdateExpectations.ObserveUpdated(request.String(), updateRevision.Name, pod)
 	}
 	// If update expectations have not satisfied yet, just skip this reconcile.
-	if updateSatisfied, updateDirtyPods := updateExpectations.SatisfiedExpectations(request.String(), updateRevision.Name); !updateSatisfied {
+	if updateSatisfied, unsatisfiedDuration, updateDirtyPods := clonesetutils.UpdateExpectations.SatisfiedExpectations(request.String(), updateRevision.Name); !updateSatisfied {
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			klog.Warningf("Expectation unsatisfied overtime for %v, updateDirtyPods=%v, timeout=%v", request.String(), updateDirtyPods, unsatisfiedDuration)
+			return reconcile.Result{}, nil
+		}
 		klog.V(4).Infof("Not satisfied update for %v, updateDirtyPods=%v", request.String(), updateDirtyPods)
-		return reconcile.Result{}, nil
+		return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+	}
+	// If resourceVersion expectations have not satisfied yet, just skip this reconcile
+	for _, pod := range filteredPods {
+		if isSatisfied, unsatisfiedDuration := clonesetutils.ResourceVersionExpectations.IsSatisfied(pod); !isSatisfied {
+			if unsatisfiedDuration >= expectations.ExpectationTimeout {
+				klog.Warningf("Expectation unsatisfied overtime for %v, wait for pod %v updating, timeout=%v", request.String(), pod.Name, unsatisfiedDuration)
+				return reconcile.Result{}, nil
+			}
+			klog.V(4).Infof("Not satisfied resourceVersion for %v, wait for pod %v updating", request.String(), pod.Name)
+			return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+		}
 	}
 
 	newStatus := appsv1alpha1.CloneSetStatus{
 		ObservedGeneration: instance.Generation,
+		CurrentRevision:    currentRevision.Name,
 		UpdateRevision:     updateRevision.Name,
 		CollisionCount:     new(int32),
 		LabelSelector:      selector.String(),
@@ -307,6 +338,7 @@ func (r *ReconcileCloneSet) syncCloneSet(
 			LastTransitionTime: metav1.Now(),
 			Message:            podsScaleErr.Error(),
 		})
+		err = podsScaleErr
 	}
 	if scaling {
 		return delayDuration, podsScaleErr
@@ -320,8 +352,12 @@ func (r *ReconcileCloneSet) syncCloneSet(
 			LastTransitionTime: metav1.Now(),
 			Message:            podsUpdateErr.Error(),
 		})
+		if err == nil {
+			err = podsUpdateErr
+		}
 	}
-	return delayDuration, podsUpdateErr
+
+	return delayDuration, err
 }
 
 func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisions []*apps.ControllerRevision, podsRevisions sets.String) (
@@ -367,9 +403,8 @@ func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisi
 
 	// attempt to find the revision that corresponds to the current revision
 	for i := range revisions {
-		if podsRevisions.Has(revisions[i].Name) {
+		if revisions[i].Name == cs.Status.CurrentRevision {
 			currentRevision = revisions[i]
-			break
 		}
 	}
 
@@ -382,15 +417,18 @@ func (r *ReconcileCloneSet) getActiveRevisions(cs *appsv1alpha1.CloneSet, revisi
 }
 
 func (r *ReconcileCloneSet) getOwnedResource(cs *appsv1alpha1.CloneSet) ([]*v1.Pod, []*v1.PersistentVolumeClaim, error) {
-	filteredPods, err := clonesetutils.GetActivePods(r.Client,
-		client.InNamespace(cs.Namespace).MatchingField(fieldindex.IndexNameForOwnerRefUID, string(cs.UID)))
+	opts := &client.ListOptions{
+		Namespace:     cs.Namespace,
+		FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
+	}
+
+	filteredPods, err := clonesetutils.GetActivePods(r.Client, opts)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	pvcList := v1.PersistentVolumeClaimList{}
-	if err := r.List(context.TODO(),
-		client.InNamespace(cs.Namespace).MatchingField(fieldindex.IndexNameForOwnerRefUID, string(cs.UID)), &pvcList); err != nil {
+	if err := r.List(context.TODO(), &pvcList, opts); err != nil {
 		return nil, nil, err
 	}
 	var filteredPVCs []*v1.PersistentVolumeClaim
@@ -468,4 +506,28 @@ func (r *ReconcileCloneSet) truncateHistory(
 		}
 	}
 	return nil
+}
+
+func (r *ReconcileCloneSet) claimPods(instance *appsv1alpha1.CloneSet, pods []*v1.Pod) ([]*v1.Pod, error) {
+	manager, err := refmanager.New(r, instance.Spec.Selector, instance, r.scheme)
+	if err != nil {
+		return nil, err
+	}
+
+	selected := make([]metav1.Object, len(pods))
+	for i, pod := range pods {
+		selected[i] = pod
+	}
+
+	claimed, err := manager.ClaimOwnedObjects(selected)
+	if err != nil {
+		return nil, err
+	}
+
+	claimedPods := make([]*v1.Pod, len(claimed))
+	for i, pod := range claimed {
+		claimedPods[i] = pod.(*v1.Pod)
+	}
+
+	return claimedPods, nil
 }

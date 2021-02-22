@@ -18,9 +18,15 @@ package uniteddeployment
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"reflect"
 
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/controller/uniteddeployment/adapter"
+	"github.com/openkruise/kruise/pkg/util"
+	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -33,11 +39,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+)
 
-	"github.com/openkruise/kruise/pkg/controller/uniteddeployment/adapter"
-	"github.com/openkruise/kruise/pkg/util/gate"
+func init() {
+	flag.IntVar(&concurrentReconciles, "uniteddeployment-workers", concurrentReconciles, "Max concurrent workers for UnitedDeployment controller.")
+}
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+var (
+	concurrentReconciles = 3
+	controllerKind       = appsv1alpha1.SchemeGroupVersion.WithKind("UnitedDeployment")
 )
 
 const (
@@ -57,12 +67,14 @@ type subSetType string
 const (
 	statefulSetSubSetType         subSetType = "StatefulSet"
 	advancedStatefulSetSubSetType subSetType = "AdvancedStatefulSet"
+	cloneSetSubSetType            subSetType = "CloneSet"
+	deploymentSubSetType          subSetType = "Deployment"
 )
 
 // Add creates a new UnitedDeployment Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !gate.ResourceEnabled(&appsv1alpha1.UnitedDeployment{}) {
+	if !utildiscovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -70,14 +82,17 @@ func Add(mgr manager.Manager) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
+	cli := util.NewClientFromManager(mgr, "uniteddeployment-controller")
 	return &ReconcileUnitedDeployment{
-		Client: mgr.GetClient(),
+		Client: cli,
 		scheme: mgr.GetScheme(),
 
-		recorder: mgr.GetRecorder(controllerName),
+		recorder: mgr.GetEventRecorderFor(controllerName),
 		subSetControls: map[subSetType]ControlInterface{
-			statefulSetSubSetType:         &SubsetControl{Client: mgr.GetClient(), scheme: mgr.GetScheme(), adapter: &adapter.StatefulSetAdapter{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}},
-			advancedStatefulSetSubSetType: &SubsetControl{Client: mgr.GetClient(), scheme: mgr.GetScheme(), adapter: &adapter.AdvancedStatefulSetAdapter{Client: mgr.GetClient(), Scheme: mgr.GetScheme()}},
+			statefulSetSubSetType:         &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.StatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			advancedStatefulSetSubSetType: &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.AdvancedStatefulSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			cloneSetSubSetType:            &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.CloneSetAdapter{Client: cli, Scheme: mgr.GetScheme()}},
+			deploymentSubSetType:          &SubsetControl{Client: cli, scheme: mgr.GetScheme(), adapter: &adapter.DeploymentAdapter{Client: cli, Scheme: mgr.GetScheme()}},
 		},
 	}
 }
@@ -85,7 +100,9 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New(controllerName, mgr, controller.Options{Reconciler: r})
+	c, err := controller.New(controllerName, mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles,
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
 	if err != nil {
 		return err
 	}
@@ -112,6 +129,22 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
+	err = c.Watch(&source.Kind{Type: &appsv1alpha1.CloneSet{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
+	err = c.Watch(&source.Kind{Type: &appsv1.Deployment{}}, &handler.EnqueueRequestForOwner{
+		IsController: true,
+		OwnerType:    &appsv1alpha1.UnitedDeployment{},
+	})
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -126,15 +159,19 @@ type ReconcileUnitedDeployment struct {
 	subSetControls map[subSetType]ControlInterface
 }
 
-// Reconcile reads that state of the cluster for a UnitedDeployment object and makes changes based on the state read
-// and what is in the UnitedDeployment.Spec
-// Automatically generate RBAC rules to allow the Controller to read and write Deployments
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=uniteddeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=uniteddeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=statefulsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=statefulsets/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=apps,resources=deployments/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=replicasets/status,verbs=get
+
+// Reconcile reads that state of the cluster for a UnitedDeployment object and makes changes based on the state read
+// and what is in the UnitedDeployment.Spec
 func (r *ReconcileUnitedDeployment) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	klog.V(4).Infof("Reconcile UnitedDeployment %s/%s", request.Namespace, request.Name)
 	// Fetch the UnitedDeployment instance
@@ -169,14 +206,19 @@ func (r *ReconcileUnitedDeployment) Reconcile(request reconcile.Request) (reconc
 	nameToSubset, err := r.getNameToSubset(instance, control, expectedRevision)
 	if err != nil {
 		klog.Errorf("Fail to get Subsets of UnitedDeployment %s/%s: %s", instance.Namespace, instance.Name, err)
-		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeFindSubsets), err.Error())
+		r.recorder.Event(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed %s",
+			eventTypeFindSubsets), err.Error())
 		return reconcile.Result{}, nil
 	}
 
-	nextReplicas, effectiveSpecifiedReplicas, ineffectiveReason := GetAllocatedReplicas(nameToSubset, instance)
+	nextReplicas, err := GetAllocatedReplicas(nameToSubset, instance)
 	klog.V(4).Infof("Get UnitedDeployment %s/%s next replicas %v", instance.Namespace, instance.Name, nextReplicas)
-	if !effectiveSpecifiedReplicas {
-		r.recorder.Eventf(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed%s", eventTypeSpecifySubbsetReplicas), "Specified subset replicas is ineffective: %s", ineffectiveReason)
+	if err != nil {
+		klog.Errorf("UnitedDeployment %s/%s Specified subset replicas is ineffective: %s",
+			instance.Namespace, instance.Name, err.Error())
+		r.recorder.Eventf(instance.DeepCopy(), corev1.EventTypeWarning, fmt.Sprintf("Failed %s",
+			eventTypeSpecifySubbsetReplicas), "Specified subset replicas is ineffective: %s", err.Error())
+		return reconcile.Result{}, nil
 	}
 
 	nextPartitions := calcNextPartitions(instance, nextReplicas)
@@ -263,6 +305,14 @@ func (r *ReconcileUnitedDeployment) getSubsetControls(instance *appsv1alpha1.Uni
 		return r.subSetControls[advancedStatefulSetSubSetType], advancedStatefulSetSubSetType
 	}
 
+	if instance.Spec.Template.CloneSetTemplate != nil {
+		return r.subSetControls[cloneSetSubSetType], cloneSetSubSetType
+	}
+
+	if instance.Spec.Template.DeploymentTemplate != nil {
+		return r.subSetControls[deploymentSubSetType], deploymentSubSetType
+	}
+
 	// unexpected
 	return nil, statefulSetSubSetType
 }
@@ -283,12 +333,12 @@ func (r *ReconcileUnitedDeployment) classifySubsetBySubsetName(ud *appsv1alpha1.
 }
 
 func (r *ReconcileUnitedDeployment) updateStatus(instance *appsv1alpha1.UnitedDeployment, newStatus, oldStatus *appsv1alpha1.UnitedDeploymentStatus, nameToSubset *map[string]*Subset, nextReplicas, nextPartition *map[string]int32, currentRevision, updatedRevision *appsv1.ControllerRevision, collisionCount int32, control ControlInterface) (reconcile.Result, error) {
-	newStatus = r.calculateStatus(instance, newStatus, nameToSubset, nextReplicas, nextPartition, currentRevision, updatedRevision, collisionCount, control)
+	newStatus = r.calculateStatus(newStatus, nameToSubset, nextReplicas, nextPartition, currentRevision, updatedRevision, collisionCount, control)
 	_, err := r.updateUnitedDeployment(instance, oldStatus, newStatus)
 	return reconcile.Result{}, err
 }
 
-func (r *ReconcileUnitedDeployment) calculateStatus(ud *appsv1alpha1.UnitedDeployment, newStatus *appsv1alpha1.UnitedDeploymentStatus, nameToSubset *map[string]*Subset, nextReplicas, nextPartition *map[string]int32, currentRevision, updatedRevision *appsv1.ControllerRevision, collisionCount int32, control ControlInterface) *appsv1alpha1.UnitedDeploymentStatus {
+func (r *ReconcileUnitedDeployment) calculateStatus(newStatus *appsv1alpha1.UnitedDeploymentStatus, nameToSubset *map[string]*Subset, nextReplicas, nextPartition *map[string]int32, currentRevision, updatedRevision *appsv1.ControllerRevision, collisionCount int32, control ControlInterface) *appsv1alpha1.UnitedDeploymentStatus {
 	expectedRevision := currentRevision.Name
 	if updatedRevision != nil {
 		expectedRevision = updatedRevision.Name

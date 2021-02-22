@@ -17,13 +17,19 @@ limitations under the License.
 package cloneset
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/kubernetes/pkg/apis/apps"
+
 	"github.com/onsi/gomega"
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
+	"github.com/openkruise/kruise/pkg/util"
 	"github.com/openkruise/kruise/pkg/util/fieldindex"
 	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
@@ -35,15 +41,20 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 var c client.Client
 
-var expectedRequest = reconcile.Request{NamespacedName: types.NamespacedName{Name: "foo", Namespace: "default"}}
-
-var images = []string{"nginx:1.9.1", "nginx:1.9.2", "nginx:1.9.3"}
+var (
+	expectedRequest = reconcile.Request{NamespacedName: types.NamespacedName{Name: "foo", Namespace: "default"}}
+	images          = []string{"nginx:1.9.1", "nginx:1.9.2", "nginx:1.9.3"}
+	clonesetUID     = "123"
+	productionLabel = map[string]string{"type": "production"}
+	nilLabel        = map[string]string{}
+)
 
 //const timeout = time.Second * 5
 
@@ -74,9 +85,9 @@ func TestReconcile(t *testing.T) {
 
 	// Setup the Manager and Controller.  Wrap the Controller Reconcile function so it writes each request to a
 	// channel when it is finished.
-	mgr, err := manager.New(cfg, manager.Options{})
+	mgr, err := manager.New(cfg, manager.Options{MetricsBindAddress: "0"})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	c = mgr.GetClient()
+	c = util.NewClientFromManager(mgr, "test-cloneset-controller")
 
 	//recFn, requests := SetupTestReconcile(newReconciler(mgr))
 	g.Expect(add(mgr, newReconciler(mgr))).NotTo(gomega.HaveOccurred())
@@ -103,7 +114,7 @@ func TestReconcile(t *testing.T) {
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Create the CloneSet object and expect the Reconcile
-	appsv1alpha1.SetDefaults_CloneSet(instance)
+	appsv1alpha1.SetDefaultsCloneSet(instance)
 	err = c.Create(context.TODO(), instance)
 	// The instance object may not be a valid object because it might be missing some required fields.
 	// Please modify the instance object by adding required fields and then remove the following if statement.
@@ -127,6 +138,93 @@ func TestReconcile(t *testing.T) {
 
 	// Test for pods update
 	testUpdate(g, instance)
+}
+
+func TestClaimPods(t *testing.T) {
+	g := gomega.NewGomegaWithT(t)
+
+	scheme := runtime.NewScheme()
+	appsv1alpha1.AddToScheme(scheme)
+	v1.AddToScheme(scheme)
+
+	instance := &appsv1alpha1.CloneSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "foo",
+			Namespace: metav1.NamespaceDefault,
+			UID:       types.UID(clonesetUID),
+		},
+		Spec: appsv1alpha1.CloneSetSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: productionLabel},
+		},
+	}
+	appsv1alpha1.SetDefaultsCloneSet(instance)
+
+	type test struct {
+		name    string
+		pods    []*v1.Pod
+		claimed []*v1.Pod
+	}
+	var tests = []test{
+		{
+			name:    "Controller releases claimed pods when selector doesn't match",
+			pods:    []*v1.Pod{newPod("pod1", productionLabel, instance), newPod("pod2", nilLabel, instance)},
+			claimed: []*v1.Pod{newPod("pod1", productionLabel, instance)},
+		},
+		{
+			name:    "Claim pods with correct label",
+			pods:    []*v1.Pod{newPod("pod3", productionLabel, nil), newPod("pod4", nilLabel, nil)},
+			claimed: []*v1.Pod{newPod("pod3", productionLabel, nil)},
+		},
+	}
+
+	for _, test := range tests {
+		initObjs := []runtime.Object{instance}
+		for i := range test.pods {
+			initObjs = append(initObjs, test.pods[i])
+		}
+		fakeClient := fake.NewFakeClientWithScheme(scheme, initObjs...)
+
+		reconciler := &ReconcileCloneSet{
+			Client: fakeClient,
+			scheme: scheme,
+		}
+
+		claimed, err := reconciler.claimPods(instance, test.pods)
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+		if !reflect.DeepEqual(podToStringSlice(test.claimed), podToStringSlice(claimed)) {
+			t.Errorf("Test case `%s`, claimed wrong pods. Expected %v, got %v", test.name, podToStringSlice(test.claimed), podToStringSlice(claimed))
+		}
+	}
+}
+
+func newPod(podName string, label map[string]string, owner metav1.Object) *v1.Pod {
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Labels:    label,
+			Namespace: metav1.NamespaceDefault,
+		},
+		Spec: v1.PodSpec{
+			Containers: []v1.Container{
+				{
+					Name:  "test",
+					Image: "foo/bar",
+				},
+			},
+		},
+	}
+	if owner != nil {
+		pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(owner, apps.SchemeGroupVersion.WithKind("Fake"))}
+	}
+	return pod
+}
+
+func podToStringSlice(pods []*v1.Pod) []string {
+	var names []string
+	for _, pod := range pods {
+		names = append(names, pod.Name)
+	}
+	return names
 }
 
 func testScale(g *gomega.GomegaWithT, instance *appsv1alpha1.CloneSet) {
@@ -256,7 +354,7 @@ func testUpdate(g *gomega.GomegaWithT, instance *appsv1alpha1.CloneSet) {
 		cs.Spec.Template.Spec.Containers[0].Image = images[1]
 		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{
 			Type:           appsv1alpha1.RecreateCloneSetUpdateStrategyType,
-			Partition:      getInt32(1),
+			Partition:      util.GetIntOrStrPointer(intstr.FromInt(1)),
 			MaxUnavailable: &maxUnavailable,
 		}
 		return c.Update(context.TODO(), &cs)
@@ -280,7 +378,7 @@ func testUpdate(g *gomega.GomegaWithT, instance *appsv1alpha1.CloneSet) {
 		cs.Spec.Template.Spec.Containers[0].Image = images[2]
 		cs.Spec.UpdateStrategy = appsv1alpha1.CloneSetUpdateStrategy{
 			Type:           appsv1alpha1.InPlaceIfPossibleCloneSetUpdateStrategyType,
-			Partition:      getInt32(2),
+			Partition:      util.GetIntOrStrPointer(intstr.FromInt(2)),
 			MaxUnavailable: &maxUnavailable,
 		}
 		return c.Update(context.TODO(), &cs)
@@ -303,15 +401,23 @@ func checkInstances(g *gomega.GomegaWithT, cs *appsv1alpha1.CloneSet, podNum int
 	var pods []*v1.Pod
 	g.Eventually(func() int {
 		var err error
-		pods, err = clonesetutils.GetActivePods(c, client.InNamespace("default").MatchingField(fieldindex.IndexNameForOwnerRefUID, string(cs.UID)))
+		opts := &client.ListOptions{
+			Namespace:     "default",
+			FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
+		}
+		pods, err = clonesetutils.GetActivePods(c, opts)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		return len(pods)
-	}, time.Second*3, time.Millisecond*500).Should(gomega.Equal(podNum))
+	}, time.Second*10, time.Millisecond*500).Should(gomega.Equal(podNum))
 
 	var pvcs []*v1.PersistentVolumeClaim
 	g.Eventually(func() int {
 		pvcList := v1.PersistentVolumeClaimList{}
-		err := c.List(context.TODO(), client.InNamespace(cs.Namespace).MatchingField(fieldindex.IndexNameForOwnerRefUID, string(cs.UID)), &pvcList)
+		opts := &client.ListOptions{
+			Namespace:     cs.Namespace,
+			FieldSelector: fields.SelectorFromSet(fields.Set{fieldindex.IndexNameForOwnerRefUID: string(cs.UID)}),
+		}
+		err := c.List(context.TODO(), &pvcList, opts)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		pvcs = []*v1.PersistentVolumeClaim{}
 		for i, pvc := range pvcList.Items {

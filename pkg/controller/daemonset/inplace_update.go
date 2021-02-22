@@ -17,7 +17,6 @@ limitations under the License.
 package daemonset
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
@@ -30,7 +29,9 @@ import (
 	"k8s.io/kubernetes/pkg/controller/daemon/util"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	kruiseExpectations "github.com/openkruise/kruise/pkg/util/expectations"
+	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 )
 
 func (dsc *ReconcileDaemonSet) inplaceRollingUpdate(ds *appsv1alpha1.DaemonSet, hash string) (reconcile.Result, error) {
@@ -41,19 +42,12 @@ func (dsc *ReconcileDaemonSet) inplaceRollingUpdate(ds *appsv1alpha1.DaemonSet, 
 
 	maxUnavailable, numUnavailable, err := dsc.getUnavailableNumbers(ds, nodeToDaemonPods)
 	if err != nil {
-		return reconcile.Result{}, fmt.Errorf("Couldn't get unavailable numbers: %v", err)
+		return reconcile.Result{}, fmt.Errorf("couldn't get unavailable numbers: %v", err)
 	}
 
-	// respect gray update choice.
-	if ds.Spec.UpdateStrategy.RollingUpdate.Selector == nil {
-		if ds.Spec.UpdateStrategy.RollingUpdate.Partition != nil &&
-			*ds.Spec.UpdateStrategy.RollingUpdate.Partition != 0 {
-			// respect partitioned nodes to keep old versions.
-			nodeToDaemonPods = dsc.getNodeToDaemonPodsByPartition(ds, nodeToDaemonPods)
-		}
-	} else {
-		// respect selected nodes to update.
-		nodeToDaemonPods = dsc.getNodeToDaemonPodsBySelector(ds, nodeToDaemonPods)
+	nodeToDaemonPods, err = dsc.filterDaemonPodsToUpdate(ds, hash, nodeToDaemonPods)
+	if err != nil {
+		return reconcile.Result{}, fmt.Errorf("failed to filterDaemonPodsToUpdate: %v", err)
 	}
 
 	_, oldPods := dsc.getAllDaemonSetPods(ds, nodeToDaemonPods, hash)
@@ -96,9 +90,13 @@ func (dsc *ReconcileDaemonSet) inplaceRollingUpdate(ds *appsv1alpha1.DaemonSet, 
 	}
 
 	// If update expectations have not satisfied yet, just skip this reconcile.
-	if updateSatisfied, updateDirtyPods := dsc.updateExp.SatisfiedExpectations(key, cur.Name); !updateSatisfied {
-		klog.V(4).Infof("Not satisfied update for %v, updateDirtyPods=%v", key, updateDirtyPods)
-		return reconcile.Result{}, nil
+	if updateSatisfied, unsatisfiedDuration, updateDirtyPods := dsc.updateExp.SatisfiedExpectations(key, cur.Name); !updateSatisfied {
+		if unsatisfiedDuration >= kruiseExpectations.ExpectationTimeout {
+			klog.Warningf("Expectation unsatisfied overtime for %v, updateDirtyPods=%v, timeout=%v", key, updateDirtyPods, unsatisfiedDuration)
+			return reconcile.Result{}, nil
+		}
+		klog.V(4).Infof("Not satisfied scale for %v, updateDirtyPods=%v", key, updateDirtyPods)
+		return reconcile.Result{RequeueAfter: kruiseExpectations.ExpectationTimeout - unsatisfiedDuration}, nil
 	}
 
 	return dsc.syncNodesWhenInplaceUpdate(ds, oldPodsToInplaceUpdate, hash, old[len(old)-1], cur)
@@ -115,14 +113,16 @@ func (dsc *ReconcileDaemonSet) syncNodesWhenInplaceUpdate(ds *appsv1alpha1.Daemo
 	// error channel to communicate back failures.  make the buffer big enough to avoid any blocking
 	errCh := make(chan error, updateDiff)
 
-	klog.V(4).Infof("Pods to delete for daemon set %s: %+v, updating %d", ds.Name, oldPodsToInplaceUpdate, updateDiff)
+	klog.V(4).Infof("Pods to in-place update for daemon set %s: %+v, updating %d", ds.Name, oldPodsToInplaceUpdate, updateDiff)
 	updateWait := sync.WaitGroup{}
 	updateWait.Add(updateDiff)
 	for i := 0; i < updateDiff; i++ {
 		go func(ix int, ds *appsv1alpha1.DaemonSet, pod *corev1.Pod) {
 			defer updateWait.Done()
 
-			res := dsc.inplaceControl.Update(pod, last, cur, nil)
+			res := dsc.inplaceControl.Update(pod, last, cur, &inplaceupdate.UpdateOptions{GetRevision: func(rev *apps.ControllerRevision) string {
+				return rev.Labels[apps.DefaultDaemonSetUniqueLabelKey]
+			}})
 			if res.InPlaceUpdate && res.UpdateErr == nil {
 				dsc.eventRecorder.Eventf(ds, corev1.EventTypeNormal, "SuccessfulUpdatePodInPlace", "successfully update pod %s in-place", pod.Name)
 				dsKey, err := kubecontroller.KeyFunc(ds)
@@ -135,8 +135,6 @@ func (dsc *ReconcileDaemonSet) syncNodesWhenInplaceUpdate(ds *appsv1alpha1.Daemo
 				if refreshRes.RefreshErr != nil {
 					klog.Errorf("failed to update pod condition: %v", err)
 				}
-				pod.Labels[apps.DefaultDaemonSetUniqueLabelKey] = hash
-				dsc.client.Update(context.TODO(), pod)
 				return
 			}
 
@@ -150,7 +148,7 @@ func (dsc *ReconcileDaemonSet) syncNodesWhenInplaceUpdate(ds *appsv1alpha1.Daemo
 	updateWait.Wait()
 
 	// collect errors if any for proper reporting/retry logic in the controller
-	errors := []error{}
+	var errors []error
 	close(errCh)
 	for err := range errCh {
 		errors = append(errors, err)

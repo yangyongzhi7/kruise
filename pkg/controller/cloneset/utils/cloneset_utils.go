@@ -21,7 +21,8 @@ import (
 	"fmt"
 	"sync"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util/expectations"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,8 +34,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// ControllerKind is GroupVersionKind for CloneSet.
-var ControllerKind = appsv1alpha1.SchemeGroupVersion.WithKind("CloneSet")
+var (
+	// ControllerKind is GroupVersionKind for CloneSet.
+	ControllerKind = appsv1alpha1.SchemeGroupVersion.WithKind("CloneSet")
+
+	ScaleExpectations           = expectations.NewScaleExpectations()
+	UpdateExpectations          = expectations.NewUpdateExpectations(GetPodRevision)
+	ResourceVersionExpectations = expectations.NewResourceVersionExpectation()
+)
 
 // GetControllerKey return key of CloneSet.
 func GetControllerKey(cs *appsv1alpha1.CloneSet) string {
@@ -44,7 +51,7 @@ func GetControllerKey(cs *appsv1alpha1.CloneSet) string {
 // GetActivePods returns all active pods in this namespace.
 func GetActivePods(reader client.Reader, opts *client.ListOptions) ([]*v1.Pod, error) {
 	podList := &v1.PodList{}
-	if err := reader.List(context.TODO(), opts, podList); err != nil {
+	if err := reader.List(context.TODO(), podList, opts); err != nil {
 		return nil, err
 	}
 
@@ -60,7 +67,7 @@ func GetActivePods(reader client.Reader, opts *client.ListOptions) ([]*v1.Pod, e
 }
 
 // GetPodRevision returns revision hash of this pod.
-func GetPodRevision(pod metav1.Object) string {
+func GetPodRevision(controllerKey string, pod metav1.Object) string {
 	return pod.GetLabels()[apps.ControllerRevisionHashLabelKey]
 }
 
@@ -68,7 +75,7 @@ func GetPodRevision(pod metav1.Object) string {
 func GetPodsRevisions(pods []*v1.Pod) sets.String {
 	revisions := sets.NewString()
 	for _, p := range pods {
-		revisions.Insert(GetPodRevision(p))
+		revisions.Insert(GetPodRevision("", p))
 	}
 	return revisions
 }
@@ -97,7 +104,7 @@ func IsRunningAndAvailable(pod *v1.Pod, minReadySeconds int32) bool {
 // SplitPodsByRevision returns Pods matched and unmatched the given revision
 func SplitPodsByRevision(pods []*v1.Pod, rev string) (matched, unmatched []*v1.Pod) {
 	for _, p := range pods {
-		if GetPodRevision(p) == rev {
+		if GetPodRevision("", p) == rev {
 			matched = append(matched, p)
 		} else {
 			unmatched = append(unmatched, p)
@@ -137,8 +144,8 @@ func GetPersistentVolumeClaims(cs *appsv1alpha1.CloneSet, pod *v1.Pod) map[strin
 	templates := cs.Spec.VolumeClaimTemplates
 	claims := make(map[string]v1.PersistentVolumeClaim, len(templates))
 	for i := range templates {
-		claim := templates[i]
-		claim.Name = getPersistentVolumeClaimName(cs, &claim, pod.Labels[appsv1alpha1.CloneSetInstanceID])
+		claim := templates[i].DeepCopy()
+		claim.Name = getPersistentVolumeClaimName(cs, claim, pod.Labels[appsv1alpha1.CloneSetInstanceID])
 		claim.Namespace = cs.Namespace
 		if claim.Labels == nil {
 			claim.Labels = make(map[string]string)
@@ -150,7 +157,7 @@ func GetPersistentVolumeClaims(cs *appsv1alpha1.CloneSet, pod *v1.Pod) map[strin
 		if ref := metav1.GetControllerOf(pod); ref != nil {
 			claim.OwnerReferences = append(claim.OwnerReferences, *ref)
 		}
-		claims[templates[i].Name] = claim
+		claims[templates[i].Name] = *claim
 	}
 	return claims
 }

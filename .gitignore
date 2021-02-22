@@ -6,9 +6,11 @@
 *.so
 *.dylib
 bin
+.temp
 
 # Test binary, build with `go test -c`
 *.test
+test/e2e/generated/bindata.go
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
@@ -22,5 +24,6 @@ bin
 *.swp
 *.swo
 *~
+.vscode
 
 .DS_Store

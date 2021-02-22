@@ -34,8 +34,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruisectlutil "github.com/openkruise/kruise/pkg/controller/util"
+	"github.com/openkruise/kruise/pkg/util"
 )
 
 var c client.Client
@@ -760,7 +761,7 @@ func TestStsUpdate(t *testing.T) {
 	stsList := expectedStsCount(g, instance, 2)
 	g.Expect(*stsList.Items[0].Spec.Replicas + *stsList.Items[1].Spec.Replicas).Should(gomega.BeEquivalentTo(2))
 	revisionList := &appsv1.ControllerRevisionList{}
-	g.Expect(c.List(context.TODO(), &client.ListOptions{}, revisionList))
+	g.Expect(c.List(context.TODO(), revisionList))
 	g.Expect(len(revisionList.Items)).Should(gomega.BeEquivalentTo(1))
 	g.Expect(c.Get(context.TODO(), client.ObjectKey{Namespace: instance.Namespace, Name: instance.Name}, instance)).Should(gomega.BeNil())
 	v1 := revisionList.Items[0].Name
@@ -776,7 +777,7 @@ func TestStsUpdate(t *testing.T) {
 
 	g.Expect(c.Get(context.TODO(), client.ObjectKey{Namespace: instance.Namespace, Name: instance.Name}, instance)).Should(gomega.BeNil())
 	revisionList = &appsv1.ControllerRevisionList{}
-	g.Expect(c.List(context.TODO(), &client.ListOptions{}, revisionList))
+	g.Expect(c.List(context.TODO(), revisionList))
 	g.Expect(len(revisionList.Items)).Should(gomega.BeEquivalentTo(2))
 	v2 := revisionList.Items[0].Name
 	if v2 == v1 {
@@ -1492,7 +1493,7 @@ func collectPodOrdinal(c client.Client, sts *appsv1.StatefulSet, expected string
 	}
 
 	podList := &corev1.PodList{}
-	if err := c.List(context.TODO(), &client.ListOptions{LabelSelector: selector}, podList); err != nil {
+	if err := c.List(context.TODO(), podList, &client.ListOptions{LabelSelector: selector}); err != nil {
 		return err
 	}
 
@@ -1588,7 +1589,7 @@ func expectedStsCount(g *gomega.GomegaWithT, ud *appsv1alpha1.UnitedDeployment, 
 	g.Expect(err).Should(gomega.BeNil())
 
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{LabelSelector: selector}, stsList); err != nil {
+		if err := c.List(context.TODO(), stsList, &client.ListOptions{LabelSelector: selector}); err != nil {
 			return err
 		}
 
@@ -1606,9 +1607,9 @@ func setUp(t *testing.T) (*gomega.GomegaWithT, chan reconcile.Request, chan stru
 	g := gomega.NewGomegaWithT(t)
 	// Setup the Manager and Controller.  Wrap the Controller Reconcile function so it writes each request to a
 	// channel when it is finished.
-	mgr, err := manager.New(cfg, manager.Options{})
+	mgr, err := manager.New(cfg, manager.Options{MetricsBindAddress: "0"})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	c = mgr.GetClient()
+	c = util.NewClientFromManager(mgr, "test-uniteddeployment-controller")
 	recFn, requests := SetupTestReconcile(newReconciler(mgr))
 	g.Expect(add(mgr, recFn)).NotTo(gomega.HaveOccurred())
 	stopMgr, mgrStopped := StartTestManager(mgr, g)
@@ -1616,51 +1617,52 @@ func setUp(t *testing.T) (*gomega.GomegaWithT, chan reconcile.Request, chan stru
 	return g, requests, stopMgr, mgrStopped
 }
 
+// clean can be shared amongst all subset workload tests (i.e. statefulsets, deployments, advancedStatefulsets, etc.).
 func clean(g *gomega.GomegaWithT, c client.Client) {
 	udList := &appsv1alpha1.UnitedDeploymentList{}
-	if err := c.List(context.TODO(), &client.ListOptions{}, udList); err == nil {
+	if err := c.List(context.TODO(), udList); err == nil {
 		for _, ud := range udList.Items {
 			c.Delete(context.TODO(), &ud)
 		}
 	}
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{}, udList); err != nil {
+		if err := c.List(context.TODO(), udList); err != nil {
 			return err
 		}
 
 		if len(udList.Items) != 0 {
-			return fmt.Errorf("expected %d sts, got %d", 0, len(udList.Items))
+			return fmt.Errorf("expected %d subset objects, got %d", 0, len(udList.Items))
 		}
 
 		return nil
 	}, timeout, time.Second).Should(gomega.Succeed())
 
 	rList := &appsv1.ControllerRevisionList{}
-	if err := c.List(context.TODO(), &client.ListOptions{}, rList); err == nil {
+	if err := c.List(context.TODO(), rList); err == nil {
 		for _, ud := range rList.Items {
 			c.Delete(context.TODO(), &ud)
 		}
 	}
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{}, rList); err != nil {
+		if err := c.List(context.TODO(), rList); err != nil {
 			return err
 		}
 
 		if len(rList.Items) != 0 {
-			return fmt.Errorf("expected %d sts, got %d", 0, len(rList.Items))
+			return fmt.Errorf("expected %d subset objects, got %d", 0, len(rList.Items))
 		}
 
 		return nil
 	}, timeout, time.Second).Should(gomega.Succeed())
 
 	stsList := &appsv1.StatefulSetList{}
-	if err := c.List(context.TODO(), &client.ListOptions{}, stsList); err == nil {
+	if err := c.List(context.TODO(), stsList); err == nil {
 		for _, sts := range stsList.Items {
 			c.Delete(context.TODO(), &sts)
 		}
 	}
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{}, stsList); err != nil {
+		if err := c.List(context.TODO(), stsList); err != nil {
 			return err
 		}
 
@@ -1672,13 +1674,13 @@ func clean(g *gomega.GomegaWithT, c client.Client) {
 	}, timeout, time.Second).Should(gomega.Succeed())
 
 	astsList := &appsv1alpha1.StatefulSetList{}
-	if err := c.List(context.TODO(), &client.ListOptions{}, astsList); err == nil {
+	if err := c.List(context.TODO(), astsList); err == nil {
 		for _, asts := range astsList.Items {
 			c.Delete(context.TODO(), &asts)
 		}
 	}
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{}, astsList); err != nil {
+		if err := c.List(context.TODO(), astsList); err != nil {
 			return err
 		}
 
@@ -1689,19 +1691,37 @@ func clean(g *gomega.GomegaWithT, c client.Client) {
 		return nil
 	}, timeout, time.Second).Should(gomega.Succeed())
 
+	deploymentList := &appsv1.DeploymentList{}
+	if err := c.List(context.TODO(), deploymentList); err == nil {
+		for _, asts := range deploymentList.Items {
+			c.Delete(context.TODO(), &asts)
+		}
+	}
+	g.Eventually(func() error {
+		if err := c.List(context.TODO(), deploymentList); err != nil {
+			return err
+		}
+
+		if len(deploymentList.Items) != 0 {
+			return fmt.Errorf("expected %d deployments, got %d", 0, len(deploymentList.Items))
+		}
+
+		return nil
+	}, timeout, time.Second).Should(gomega.Succeed())
+
 	podList := &corev1.PodList{}
-	if err := c.List(context.TODO(), &client.ListOptions{}, podList); err == nil {
+	if err := c.List(context.TODO(), podList); err == nil {
 		for _, pod := range podList.Items {
 			c.Delete(context.TODO(), &pod)
 		}
 	}
 	g.Eventually(func() error {
-		if err := c.List(context.TODO(), &client.ListOptions{}, podList); err != nil {
+		if err := c.List(context.TODO(), podList); err != nil {
 			return err
 		}
 
 		if len(podList.Items) != 0 {
-			return fmt.Errorf("expected %d sts, got %d", 0, len(podList.Items))
+			return fmt.Errorf("expected %d pods, got %d", 0, len(podList.Items))
 		}
 
 		return nil

@@ -19,11 +19,9 @@ package broadcastjob
 
 import (
 	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
@@ -142,12 +140,4 @@ func validateControllerRef(controllerRef *metav1.OwnerReference) error {
 		return fmt.Errorf("controllerRef.BlockOwnerDeletion is not set")
 	}
 	return nil
-}
-
-func percentageToAbsolute(percentage string) (int, error) {
-	absolute, err := strconv.Atoi(strings.TrimSuffix(percentage, "%"))
-	if err != nil {
-		return 0, err
-	}
-	return absolute, nil
 }

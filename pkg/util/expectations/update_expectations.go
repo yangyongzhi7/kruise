@@ -18,6 +18,7 @@ package expectations
 
 import (
 	"sync"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -27,12 +28,13 @@ import (
 type UpdateExpectations interface {
 	ExpectUpdated(controllerKey, revision string, obj metav1.Object)
 	ObserveUpdated(controllerKey, revision string, obj metav1.Object)
-	SatisfiedExpectations(controllerKey, revision string) (bool, []string)
+	DeleteObject(controllerKey string, obj metav1.Object)
+	SatisfiedExpectations(controllerKey, revision string) (bool, time.Duration, []string)
 	DeleteExpectations(controllerKey string)
 }
 
 // NewUpdateExpectations returns a common UpdateExpectations.
-func NewUpdateExpectations(getRevision func(metav1.Object) string) UpdateExpectations {
+func NewUpdateExpectations(getRevision func(string, metav1.Object) string) UpdateExpectations {
 	return &realUpdateExpectations{
 		controllerCache: make(map[string]*realControllerUpdateExpectations),
 		getRevision:     getRevision,
@@ -40,18 +42,19 @@ func NewUpdateExpectations(getRevision func(metav1.Object) string) UpdateExpecta
 }
 
 type realUpdateExpectations struct {
-	sync.RWMutex
+	sync.Mutex
 	// key: parent key, workload namespace/name
 	controllerCache map[string]*realControllerUpdateExpectations
 	// how to get pod revision
-	getRevision func(metav1.Object) string
+	getRevision func(string, metav1.Object) string
 }
 
 type realControllerUpdateExpectations struct {
 	// latest revision
 	revision string
 	// item: pod name for this revision
-	objsUpdated sets.String
+	objsUpdated               sets.String
+	firstUnsatisfiedTimestamp time.Time
 }
 
 func (r *realUpdateExpectations) ExpectUpdated(controllerKey, revision string, obj metav1.Object) {
@@ -79,7 +82,7 @@ func (r *realUpdateExpectations) ObserveUpdated(controllerKey, revision string, 
 		return
 	}
 
-	if expectations.revision == revision && expectations.objsUpdated.Has(getKey(obj)) && r.getRevision(obj) == revision {
+	if expectations.revision == revision && expectations.objsUpdated.Has(getKey(obj)) && r.getRevision(controllerKey, obj) == revision {
 		expectations.objsUpdated.Delete(getKey(obj))
 	}
 
@@ -88,18 +91,39 @@ func (r *realUpdateExpectations) ObserveUpdated(controllerKey, revision string, 
 	}
 }
 
-func (r *realUpdateExpectations) SatisfiedExpectations(controllerKey, revision string) (bool, []string) {
+func (r *realUpdateExpectations) DeleteObject(controllerKey string, obj metav1.Object) {
+	r.Lock()
+	defer r.Unlock()
+
+	expectations := r.controllerCache[controllerKey]
+	if expectations == nil {
+		return
+	}
+
+	expectations.objsUpdated.Delete(getKey(obj))
+}
+
+func (r *realUpdateExpectations) SatisfiedExpectations(controllerKey, revision string) (bool, time.Duration, []string) {
 	r.Lock()
 	defer r.Unlock()
 
 	oldExpectations := r.controllerCache[controllerKey]
 	if oldExpectations == nil {
-		return true, nil
+		return true, 0, nil
 	} else if oldExpectations.revision != revision {
-		return true, nil
+		oldExpectations.firstUnsatisfiedTimestamp = time.Time{}
+		return true, 0, nil
 	}
 
-	return oldExpectations.objsUpdated.Len() == 0, oldExpectations.objsUpdated.List()
+	if oldExpectations.objsUpdated.Len() > 0 {
+		if oldExpectations.firstUnsatisfiedTimestamp.IsZero() {
+			oldExpectations.firstUnsatisfiedTimestamp = time.Now()
+		}
+		return false, time.Since(oldExpectations.firstUnsatisfiedTimestamp), oldExpectations.objsUpdated.List()
+	}
+
+	oldExpectations.firstUnsatisfiedTimestamp = time.Time{}
+	return true, 0, oldExpectations.objsUpdated.List()
 }
 
 func (r *realUpdateExpectations) DeleteExpectations(controllerKey string) {

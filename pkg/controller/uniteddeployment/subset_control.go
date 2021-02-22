@@ -26,7 +26,7 @@ import (
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/controller/uniteddeployment/adapter"
 	"github.com/openkruise/kruise/pkg/util/refmanager"
 )
@@ -47,7 +47,7 @@ func (m *SubsetControl) GetAllSubsets(ud *alpha1.UnitedDeployment, updatedRevisi
 	}
 
 	setList := m.adapter.NewResourceListObject()
-	err = m.Client.List(context.TODO(), &client.ListOptions{LabelSelector: selector}, setList)
+	err = m.Client.List(context.TODO(), setList, &client.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +80,9 @@ func (m *SubsetControl) GetAllSubsets(ud *alpha1.UnitedDeployment, updatedRevisi
 // CreateSubset creates the Subset depending on the inputs.
 func (m *SubsetControl) CreateSubset(ud *alpha1.UnitedDeployment, subsetName string, revision string, replicas, partition int32) error {
 	set := m.adapter.NewResourceObject()
-	m.adapter.ApplySubsetTemplate(ud, subsetName, revision, replicas, partition, set)
+	if err := m.adapter.ApplySubsetTemplate(ud, subsetName, revision, replicas, partition, set); err != nil {
+		return err
+	}
 
 	klog.V(4).Infof("Have %d replicas when creating Subset for UnitedDeployment %s/%s", replicas, ud.Namespace, ud.Name)
 	return m.Create(context.TODO(), set)
@@ -150,7 +152,6 @@ func (m *SubsetControl) convertToSubset(set metav1.Object, updatedRevision strin
 		Labels:                     set.GetLabels(),
 		Annotations:                set.GetAnnotations(),
 		OwnerReferences:            set.GetOwnerReferences(),
-		Initializers:               set.GetInitializers(),
 		Finalizers:                 set.GetFinalizers(),
 		ClusterName:                set.GetClusterName(),
 	}

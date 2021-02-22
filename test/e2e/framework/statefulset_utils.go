@@ -29,7 +29,7 @@ import (
 
 	"github.com/onsi/gomega"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	kruiseclientset "github.com/openkruise/kruise/pkg/client/clientset/versioned"
 	"github.com/openkruise/kruise/test/e2e/manifest"
 	apps "k8s.io/api/apps/v1"
@@ -720,7 +720,7 @@ func DeleteAllStatefulSets(c clientset.Interface, kc kruiseclientset.Interface, 
 		return true, nil
 	})
 	if pvcPollErr != nil {
-		errList = append(errList, fmt.Sprintf("Timeout waiting for pvc deletion."))
+		errList = append(errList, "Timeout waiting for pvc deletion.")
 	}
 
 	pollErr := wait.PollImmediate(StatefulSetPoll, StatefulSetTimeout, func() (bool, error) {
@@ -742,7 +742,7 @@ func DeleteAllStatefulSets(c clientset.Interface, kc kruiseclientset.Interface, 
 		return false, nil
 	})
 	if pollErr != nil {
-		errList = append(errList, fmt.Sprintf("Timeout waiting for pv provisioner to delete pvs, this might mean the test leaked pvs."))
+		errList = append(errList, "Timeout waiting for pv provisioner to delete pvs, this might mean the test leaked pvs.")
 	}
 	if len(errList) != 0 {
 		ExpectNoError(fmt.Errorf("%v", strings.Join(errList, "\n")))
@@ -751,7 +751,7 @@ func DeleteAllStatefulSets(c clientset.Interface, kc kruiseclientset.Interface, 
 
 // NewStatefulSetPVC returns a PersistentVolumeClaim named name, for testing StatefulSets.
 func NewStatefulSetPVC(name string) v1.PersistentVolumeClaim {
-	quantity, _ := resource.ParseQuantity("20Gi")
+	//quantity, _ := resource.ParseQuantity("20Gi")
 	return v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -762,7 +762,7 @@ func NewStatefulSetPVC(name string) v1.PersistentVolumeClaim {
 			},
 			Resources: v1.ResourceRequirements{
 				Requests: v1.ResourceList{
-					v1.ResourceStorage: quantity, //*resource.NewQuantity(1, resource.BinarySI),
+					v1.ResourceStorage: *resource.NewQuantity(1, resource.BinarySI),
 				},
 			},
 		},

@@ -17,7 +17,7 @@ limitations under the License.
 package core
 
 import (
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util/inplaceupdate"
 	v1 "k8s.io/api/core/v1"
 )
@@ -41,6 +41,7 @@ type Control interface {
 	IsPodUpdateReady(pod *v1.Pod, minReadySeconds int32) bool
 	GetPodsSortFunc(pods []*v1.Pod, waitUpdateIndexes []int) func(i, j int) bool
 	GetUpdateOptions() *inplaceupdate.UpdateOptions
+	ExtraStatusCalculation(status *appsv1alpha1.CloneSetStatus, pods []*v1.Pod) error
 
 	// validation
 	ValidateCloneSetUpdate(oldCS, newCS *appsv1alpha1.CloneSet) error

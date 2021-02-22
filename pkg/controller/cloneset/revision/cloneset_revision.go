@@ -20,7 +20,7 @@ package revision
 import (
 	"encoding/json"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetcore "github.com/openkruise/kruise/pkg/controller/cloneset/core"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	apps "k8s.io/api/apps/v1"
@@ -82,7 +82,7 @@ func (c *realControl) getPatch(cs *appsv1alpha1.CloneSet, coreControl clonesetco
 		return nil, err
 	}
 	var raw map[string]interface{}
-	_ = json.Unmarshal([]byte(str), &raw)
+	_ = json.Unmarshal(str, &raw)
 	objCopy := make(map[string]interface{})
 	specCopy := make(map[string]interface{})
 	spec := raw["spec"].(map[string]interface{})
@@ -96,7 +96,11 @@ func (c *realControl) getPatch(cs *appsv1alpha1.CloneSet, coreControl clonesetco
 
 func (c *realControl) ApplyRevision(cs *appsv1alpha1.CloneSet, revision *apps.ControllerRevision) (*appsv1alpha1.CloneSet, error) {
 	clone := cs.DeepCopy()
-	patched, err := strategicpatch.StrategicMergePatch([]byte(runtime.EncodeOrDie(patchCodec, clone)), revision.Data.Raw, clone)
+	cloneBytes, err := runtime.Encode(patchCodec, clone)
+	if err != nil {
+		return nil, err
+	}
+	patched, err := strategicpatch.StrategicMergePatch(cloneBytes, revision.Data.Raw, clone)
 	if err != nil {
 		return nil, err
 	}

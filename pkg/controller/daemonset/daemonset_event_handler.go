@@ -33,7 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
 var _ handler.EventHandler = &podEventHandler{}
@@ -53,7 +53,7 @@ func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimiting
 
 	// If it has a ControllerRef, that's all that matters.
 	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
-		req := resoleControllerRef(pod.Namespace, controllerRef)
+		req := resolveControllerRef(pod.Namespace, controllerRef)
 		if req == nil {
 			return
 		}
@@ -81,10 +81,10 @@ func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimiting
 	}
 }
 
-func (e *podEventHandler) joinDaemonSetNames(csList []appsv1alpha1.DaemonSet) string {
+func (e *podEventHandler) joinDaemonSetNames(dsList []appsv1alpha1.DaemonSet) string {
 	var names []string
-	for _, cs := range csList {
-		names = append(names, cs.Name)
+	for _, ds := range dsList {
+		names = append(names, ds.Name)
 	}
 	return strings.Join(names, ",")
 }
@@ -118,14 +118,14 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 	controllerRefChanged := !reflect.DeepEqual(curControllerRef, oldControllerRef)
 	if controllerRefChanged && oldControllerRef != nil {
 		// The ControllerRef was changed. Sync the old controller, if any.
-		if req := resoleControllerRef(oldPod.Namespace, oldControllerRef); req != nil {
+		if req := resolveControllerRef(oldPod.Namespace, oldControllerRef); req != nil {
 			q.Add(*req)
 		}
 	}
 
 	// If it has a ControllerRef, that's all that matters.
 	if curControllerRef != nil {
-		req := resoleControllerRef(curPod.Namespace, curControllerRef)
+		req := resolveControllerRef(curPod.Namespace, curControllerRef)
 		if req == nil {
 			return
 		}
@@ -164,7 +164,7 @@ func (e *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimiting
 		// No controller should care about orphans being deleted.
 		return
 	}
-	req := resoleControllerRef(pod.Namespace, controllerRef)
+	req := resolveControllerRef(pod.Namespace, controllerRef)
 	if req == nil {
 		return
 	}
@@ -179,7 +179,7 @@ func (e *podEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimiti
 
 }
 
-func resoleControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
+func resolveControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
 	// Parse the Group out of the OwnerReference to compare it to what was parsed out of the requested OwnerType
 	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
 	if err != nil {
@@ -204,7 +204,7 @@ func resoleControllerRef(namespace string, controllerRef *metav1.OwnerReference)
 
 func (e *podEventHandler) getPodDaemonSets(pod *v1.Pod) []appsv1alpha1.DaemonSet {
 	dsList := appsv1alpha1.DaemonSetList{}
-	if err := e.List(context.TODO(), client.InNamespace(pod.Namespace), &dsList); err != nil {
+	if err := e.List(context.TODO(), &dsList, client.InNamespace(pod.Namespace)); err != nil {
 		return nil
 	}
 
@@ -230,12 +230,12 @@ func (e *podEventHandler) getPodDaemonSets(pod *v1.Pod) []appsv1alpha1.DaemonSet
 var _ handler.EventHandler = &nodeEventHandler{}
 
 type nodeEventHandler struct {
-	client client.Client
+	reader client.Reader
 }
 
 func (e *nodeEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitingInterface) {
 	dsList := &appsv1alpha1.DaemonSetList{}
-	err := e.client.List(context.TODO(), &client.ListOptions{}, dsList)
+	err := e.reader.List(context.TODO(), dsList)
 	if err != nil {
 		klog.V(6).Infof("Error enqueueing daemon sets: %v", err)
 		return
@@ -244,7 +244,7 @@ func (e *nodeEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimitin
 	node := evt.Object.(*v1.Node)
 	klog.V(6).Infof("add new node: %v", node.Name)
 	for index, ds := range dsList.Items {
-		_, shouldSchedule, _, err := NodeShouldRunDaemonPod(e.client, node, &dsList.Items[index])
+		_, shouldSchedule, _, err := NodeShouldRunDaemonPod(e.reader, node, &dsList.Items[index])
 		if err != nil {
 			continue
 		}
@@ -267,18 +267,18 @@ func (e *nodeEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimitin
 	}
 
 	dsList := &appsv1alpha1.DaemonSetList{}
-	err := e.client.List(context.TODO(), &client.ListOptions{}, dsList)
+	err := e.reader.List(context.TODO(), dsList)
 	if err != nil {
 		klog.V(6).Infof("Error enqueueing daemon sets: %v", err)
 		return
 	}
 	// TODO: it'd be nice to pass a hint with these enqueues, so that each ds would only examine the added node (unless it has other work to do, too).
 	for index, ds := range dsList.Items {
-		_, oldShouldSchedule, oldShouldContinueRunning, err := NodeShouldRunDaemonPod(e.client, oldNode, &dsList.Items[index])
+		_, oldShouldSchedule, oldShouldContinueRunning, err := NodeShouldRunDaemonPod(e.reader, oldNode, &dsList.Items[index])
 		if err != nil {
 			continue
 		}
-		_, currentShouldSchedule, currentShouldContinueRunning, err := NodeShouldRunDaemonPod(e.client, curNode, &dsList.Items[index])
+		_, currentShouldSchedule, currentShouldContinueRunning, err := NodeShouldRunDaemonPod(e.reader, curNode, &dsList.Items[index])
 		if err != nil {
 			continue
 		}

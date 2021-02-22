@@ -22,7 +22,7 @@ import (
 	"strings"
 	"testing"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -31,38 +31,38 @@ func TestGenerateRules(t *testing.T) {
 	testCases := []struct {
 		desc            string
 		podLabels       []map[string]string
-		scatterStrategy appsv1alpha1.CloneSetUpdateScatterStrategy
-		expectedResult  []appsv1alpha1.CloneSetUpdateScatterTerm
+		scatterStrategy appsv1alpha1.UpdateScatterStrategy
+		expectedResult  []appsv1alpha1.UpdateScatterTerm
 	}{
 		{
 			desc:            "one pod one label",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"labelA": "AAA"}, {"labelA": "AAA"}},
-			scatterStrategy: []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "labelA", Value: "AAA"}},
-			expectedResult:  []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "labelA", Value: "AAA"}},
+			scatterStrategy: []appsv1alpha1.UpdateScatterTerm{{Key: "labelA", Value: "AAA"}},
+			expectedResult:  []appsv1alpha1.UpdateScatterTerm{{Key: "labelA", Value: "AAA"}},
 		},
 		{
 			desc:            "same pods a label",
 			podLabels:       []map[string]string{{}, {}, {"labelB": "B"}, {"labelB": "BBB"}, {"labelA": "AAA"}, {"labelA": "AAA"}},
-			scatterStrategy: []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
-			expectedResult:  []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: []appsv1alpha1.UpdateScatterTerm{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			expectedResult:  []appsv1alpha1.UpdateScatterTerm{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 		},
 		//{
 		//	desc:            "test regular label",
 		//	podLabels:       []map[string]string{{"mode": "AAA"}, {"mode": "AAA"}, {"mode": "AAA"}, {"mode": "BBB"}, {"mode": "BBB"}, {}, {}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC"}},
-		//	scatterStrategy: []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "*"}},
-		//	expectedResult:  []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "mode", Value: "BBB"}},
+		//	scatterStrategy: []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "*"}},
+		//	expectedResult:  []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "mode", Value: "BBB"}},
 		//},
 		//{
 		//	desc:            "test regular label + other label",
 		//	podLabels:       []map[string]string{{"mode": "AAA"}, {"mode": "AAA", "labelB": "BBB"}, {"mode": "AAA"}, {"mode": "BBB"}, {"mode": "BBB"}, {}, {}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC", "labelB": "BBB"}, {"mode": "CCC"}},
-		//	scatterStrategy: []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "*"}, {Key: "labelB", Value: "BBB"}},
-		//	expectedResult:  []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "mode", Value: "BBB"}, {Key: "labelB", Value: "BBB"}},
+		//	scatterStrategy: []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "*"}, {Key: "labelB", Value: "BBB"}},
+		//	expectedResult:  []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "mode", Value: "BBB"}, {Key: "labelB", Value: "BBB"}},
 		//},
 		//{
 		//	desc:            "test more regular labels",
 		//	podLabels:       []map[string]string{{"mode": "AAA"}, {"mode": "AAA", "labelB": "BBB"}, {"mode": "AAA"}, {"mode": "BBB"}, {"mode": "BBB"}, {"env": "AAA"}, {}, {"env": "AAA", "mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC", "labelB": "BBB", "env": "AAA"}, {"mode": "CCC"}, {"env": "CCC"}, {"env": "CCC"}},
-		//	scatterStrategy: []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "*"}, {Key: "env", Value: "*"}},
-		//	expectedResult:  []appsv1alpha1.CloneSetUpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "env", Value: "AAA"}, {Key: "mode", Value: "BBB"}, {Key: "env", Value: "CCC"}},
+		//	scatterStrategy: []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "*"}, {Key: "env", Value: "*"}},
+		//	expectedResult:  []appsv1alpha1.UpdateScatterTerm{{Key: "mode", Value: "CCC"}, {Key: "mode", Value: "AAA"}, {Key: "env", Value: "AAA"}, {Key: "mode", Value: "BBB"}, {Key: "env", Value: "CCC"}},
 		//},
 	}
 
@@ -92,7 +92,7 @@ func TestGenerateRules(t *testing.T) {
 }
 
 func TestScatterPodsByRule(t *testing.T) {
-	strategyTerm := appsv1alpha1.CloneSetUpdateScatterTerm{Key: "labelA", Value: "AAA"}
+	strategyTerm := appsv1alpha1.UpdateScatterTerm{Key: "labelA", Value: "AAA"}
 	testCases := []struct {
 		desc            string
 		podLabels       []string
@@ -184,7 +184,7 @@ func TestScatterPodsByRule(t *testing.T) {
 			indexes = append(indexes, i)
 		}
 
-		ss := &scatterSort{strategy: []appsv1alpha1.CloneSetUpdateScatterTerm{strategyTerm}}
+		ss := &scatterSort{strategy: []appsv1alpha1.UpdateScatterTerm{strategyTerm}}
 		gotIndexes := ss.scatterPodsByRule(strategyTerm, pods, indexes)
 
 		// compare
@@ -198,158 +198,170 @@ func TestSort(t *testing.T) {
 	testCases := []struct {
 		desc            string
 		podLabels       []map[string]string
-		scatterStrategy appsv1alpha1.CloneSetUpdateScatterStrategy
+		scatterStrategy appsv1alpha1.UpdateScatterStrategy
 		expectedIndexes []int
 	}{
 		{
 			desc:            "a scattered pod + a ordinary pod",
 			podLabels:       []map[string]string{{"labelA": "AAA", "labelB": "BBB"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
 			expectedIndexes: []int{0},
 		},
 		{
 			desc:            "all ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {}, {}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{},
 			expectedIndexes: []int{0, 1, 2, 3, 4, 5},
 		},
 		{
 			desc:            "one pod one label",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"labelA": "AAA"}, {"labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
 			expectedIndexes: []int{4, 0, 1, 2, 3, 5},
 		},
 		{
 			desc:            "one pod more labels",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelB": "BBB"}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"labelA": "AAA", "labelB": "BBB"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{6, 0, 1, 2, 3, 4, 5, 7, 8, 9},
 		},
 		{
 			desc:            "2 dimensions + one pod one label",
 			podLabels:       []map[string]string{{"labelB": "BBB"}, {"labelB": "BBB"}, {}, {}, {"labelA": "AAA"}, {"labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{0, 4, 2, 3, 5, 1},
 		},
 		{
 			desc:            "2 dimensions + one pod more labels",
 			podLabels:       []map[string]string{{}, {}, {}, {"labelB": "BBB"}, {"labelA": "AAA", "labelB": "BBB"}, {"labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{4, 0, 1, 2, 5, 3},
 		},
 		{
 			desc:            "2 dimensions + same label + sequence: A + B",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelB": "BBB"}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"labelB": "BBB"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelB", Value: "BBB"}, {Key: "labelA", Value: "AAA"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelB", Value: "BBB"}, {Key: "labelA", Value: "AAA"}},
 			expectedIndexes: []int{7, 6, 0, 1, 2, 3, 4, 5, 9, 8},
 		},
 		{
 			desc:            "2 dimensions + same label + sequence: B + A",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelB": "BBB"}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"labelB": "BBB"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{6, 7, 0, 1, 2, 3, 4, 5, 8, 9},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + even scatter pods + even ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{6, 0, 1, 2, 3, 4, 5, 7, 8, 9},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + even scatter pods + odd ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{5, 0, 1, 2, 3, 4, 6, 7, 8},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + odd scatter pods + odd ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {"labelA": "AAA"}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{3, 0, 1, 2, 4, 5, 7, 6},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + odd scatter pods + odd ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {"labelA": "AAA"}, {}, {}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{0, 1, 2, 4, 3, 5, 6, 7, 9, 10, 8},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + even scatter pods + even ordinary pods + scatter pods more than ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {}, {"labelA": "AAA"}, {"sdfb": "eee", "labelA": "AAA"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{6, 3, 0, 1, 4, 2, 5, 7, 8, 9},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + even scatter pods + odd ordinary pods + scatter pods more than ordinary pods",
 			podLabels:       []map[string]string{{}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{5, 1, 0, 3, 2, 4, 6, 7, 8},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + odd scatter pods + odd ordinary pods + scatter pods more than ordinary pods",
 			podLabels:       []map[string]string{{"labelA": "AAA"}, {}, {}, {"labelA": "AAA"}, {"sdfb": "eee", "labelA": "AAA"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{1, 0, 2, 3, 5, 4, 7, 6},
 		},
 		{
 			desc:            "2 dimensions + same pod same label + odd scatter pods + odd ordinary pods + scatter pods more than ordinary pods",
 			podLabels:       []map[string]string{{}, {}, {"labelA": "AAA"}, {"labelA": "AAA"}, {}, {"labelA": "AAA"}, {"sdfb": "eee"}, {"dsf": "same"}, {"labelA": "AAA", "labelB": "BBB"}, {}, {}, {"labelB": "BBB", "labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}},
 			expectedIndexes: []int{0, 2, 1, 4, 3, 6, 7, 5, 9, 10, 8},
 		},
 		{
 			desc:            "3 dimensions + one pod one label",
 			podLabels:       []map[string]string{{}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"labelB": "BBB"}, {"labelB": "BBB"}, {"labelC": "CCC"}, {"labelC": "CCC"}, {"labelC": "CCC"}, {"labelC": "CCC"}, {"labelC": "CCC"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}, {Key: "labelC", Value: "CCC"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}, {Key: "labelC", Value: "CCC"}},
 			expectedIndexes: []int{3, 1, 5, 0, 6, 7, 8, 9, 2, 4},
 		},
 		{
 			desc:            "3 dimensions + one pod more label",
 			podLabels:       []map[string]string{{}, {"labelA": "AAA"}, {"labelA": "AAA", "labelC": "CCC"}, {"labelB": "BBB", "labelC": "CCC"}, {"labelB": "BBB"}, {}, {}, {"labelC": "CCC"}, {"labelC": "CCC"}, {"labelC": "CCC"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}, {Key: "labelC", Value: "CCC"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}, {Key: "labelC", Value: "CCC"}},
 			expectedIndexes: []int{3, 2, 0, 7, 8, 5, 6, 9, 1, 4},
 		},
 		//{
 		//	desc:            "test regular label",
 		//	podLabels:       []map[string]string{{"mode": "AAA"}, {"mode": "AAA"}, {"mode": "AAA"}, {"mode": "BBB"}, {"mode": "BBB"}, {}, {}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC"}},
-		//	scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "mode", Value: "*"}},
+		//	scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "mode", Value: "*"}},
 		//	expectedIndexes: []int{3, 0, 7, 8, 9, 1, 5, 6, 10, 2, 4},
 		//},
 		//{
 		//	desc:            "test regular label + other label",
 		//	podLabels:       []map[string]string{{"mode": "AAA"}, {"mode": "AAA", "labelB": "BBB"}, {"mode": "AAA"}, {"mode": "BBB"}, {"mode": "BBB"}, {}, {}, {"mode": "CCC"}, {"mode": "CCC"}, {"mode": "CCC", "labelB": "BBB"}, {"mode": "CCC"}},
-		//	scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "mode", Value: "*"}, {Key: "labelB", Value: "BBB"}},
+		//	scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "mode", Value: "*"}, {Key: "labelB", Value: "BBB"}},
 		//	expectedIndexes: []int{9, 3, 0, 7, 8, 5, 6, 10, 2, 4, 1},
 		//},
 		{
 			desc:            "continuous sort 1",
 			podLabels:       []map[string]string{{}, {}, {}, {}, {"labelA": "AAA"}, {"labelA": "AAA"}, {"labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
 			expectedIndexes: []int{0, 1, 4, 2, 3, 5},
 		},
 		{
 			desc:            "continuous sort 2",
 			podLabels:       []map[string]string{{"labelA": "AAA"}, {"labelA": "AAA"}, {}, {}, {}, {}, {}, {}, {}, {"labelA": "AAA"}},
-			scatterStrategy: appsv1alpha1.CloneSetUpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}},
 			expectedIndexes: []int{2, 0, 3, 4, 5, 6, 1},
+		},
+		{
+			desc:            "reserveOrdinals nil in slice",
+			podLabels:       []map[string]string{{}, {"labelA": "AAA"}, {"labelA": "AAA", "labelC": "CCC"}, {"labelB": "BBB", "labelC": "CCC"}, {"labelB": "BBB"}, nil, {}, {}, {"labelC": "CCC"}, {"labelC": "CCC"}, {"labelC": "CCC"}},
+			scatterStrategy: appsv1alpha1.UpdateScatterStrategy{{Key: "labelA", Value: "AAA"}, {Key: "labelB", Value: "BBB"}, {Key: "labelC", Value: "CCC"}},
+			expectedIndexes: []int{3, 2, 0, 8, 9, 6, 7, 10, 1, 4},
 		},
 	}
 
 	for idx, tc := range testCases {
 		var pods []*v1.Pod
 		var indexes []int
-		for i := 0; i < len(tc.expectedIndexes); i++ {
-			pod := &v1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Namespace: "default",
-					Labels:    tc.podLabels[i],
-					Name:      fmt.Sprintf("%d", i),
-				},
+		var j int
+		for i := 0; i < len(tc.expectedIndexes)+j; i++ {
+			var pod *v1.Pod
+			if tc.podLabels[i] != nil {
+				pod = &v1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "default",
+						Labels:    tc.podLabels[i],
+						Name:      fmt.Sprintf("%d", i),
+					},
+				}
+				indexes = append(indexes, i)
+			} else {
+				j++
 			}
 			pods = append(pods, pod)
-			indexes = append(indexes, i)
 		}
-		for i := len(indexes); i < len(tc.podLabels); i++ {
+		for i := len(indexes) + j; i < len(tc.podLabels); i++ {
 			pod := &v1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -365,7 +377,7 @@ func TestSort(t *testing.T) {
 
 		// compare
 		if !reflect.DeepEqual(gotIndexes, tc.expectedIndexes) {
-			t.Errorf("[%d] wrong order. desired: %v, got: %v", idx, tc.expectedIndexes, gotIndexes)
+			t.Errorf("[%d][%s] wrong order. desired: %v, got: %v", idx, tc.desc, tc.expectedIndexes, gotIndexes)
 		}
 	}
 }

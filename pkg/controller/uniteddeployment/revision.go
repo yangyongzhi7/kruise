@@ -32,7 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	appsalphav1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsalphav1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
@@ -47,7 +47,7 @@ func (r *ReconcileUnitedDeployment) controlledHistories(ud *appsalphav1.UnitedDe
 		return nil, err
 	}
 	histories := &apps.ControllerRevisionList{}
-	err = r.Client.List(context.TODO(), &client.ListOptions{LabelSelector: selector}, histories)
+	err = r.Client.List(context.TODO(), histories, &client.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}
@@ -78,32 +78,25 @@ func (r *ReconcileUnitedDeployment) controlledHistories(ud *appsalphav1.UnitedDe
 
 func (r *ReconcileUnitedDeployment) constructUnitedDeploymentRevisions(ud *appsalphav1.UnitedDeployment) (*apps.ControllerRevision, *apps.ControllerRevision, *[]*apps.ControllerRevision, int32, error) {
 	var currentRevision, updateRevision *apps.ControllerRevision
-	revisions, err := r.controlledHistories(ud)
-	if err != nil {
-		if ud.Status.CollisionCount == nil {
-			return currentRevision, updateRevision, nil, 0, err
-		}
-		return currentRevision, updateRevision, nil, *ud.Status.CollisionCount, err
-	}
-
-	history.SortControllerRevisions(revisions)
-	cleanedRevision, err := r.cleanExpiredRevision(ud, &revisions)
-	if err != nil {
-		if ud.Status.CollisionCount == nil {
-			return currentRevision, updateRevision, nil, 0, err
-		}
-		return currentRevision, updateRevision, nil, *ud.Status.CollisionCount, err
-	}
-	revisions = *cleanedRevision
-
-	// Use a local copy of set.Status.CollisionCount to avoid modifying set.Status directly.
-	// This copy is returned so the value gets carried over to set.Status in updateStatefulSet.
+	// Use a local copy of ud.Status.CollisionCount to avoid modifying ud.Status directly.
 	var collisionCount int32
 	if ud.Status.CollisionCount != nil {
 		collisionCount = *ud.Status.CollisionCount
 	}
 
-	// create a new revision from the current set
+	revisions, err := r.controlledHistories(ud)
+	if err != nil {
+		return currentRevision, updateRevision, nil, collisionCount, err
+	}
+
+	history.SortControllerRevisions(revisions)
+	cleanedRevision, err := r.cleanExpiredRevision(ud, &revisions)
+	if err != nil {
+		return currentRevision, updateRevision, nil, collisionCount, err
+	}
+	revisions = *cleanedRevision
+
+	// create a new revision from the current ud
 	updateRevision, err = r.newRevision(ud, nextRevision(revisions), &collisionCount)
 	if err != nil {
 		return nil, nil, nil, collisionCount, err
@@ -194,6 +187,7 @@ func (r *ReconcileUnitedDeployment) createControllerRevision(parent metav1.Objec
 		hash := history.HashControllerRevision(revision, collisionCount)
 		// Update the revisions name
 		clone.Name = history.ControllerRevisionName(parent.GetName(), hash)
+		clone.Labels[history.ControllerRevisionHashLabel] = hash
 		err = r.Client.Create(context.TODO(), clone)
 		if errors.IsAlreadyExists(err) {
 			exists := &apps.ControllerRevision{}
@@ -231,6 +225,8 @@ func (r *ReconcileUnitedDeployment) newRevision(ud *appsalphav1.UnitedDeployment
 		selectedLabels = ud.Spec.Template.StatefulSetTemplate.Labels
 	} else if ud.Spec.Template.AdvancedStatefulSetTemplate != nil {
 		selectedLabels = ud.Spec.Template.AdvancedStatefulSetTemplate.Labels
+	} else if ud.Spec.Template.DeploymentTemplate != nil {
+		selectedLabels = ud.Spec.Template.DeploymentTemplate.Labels
 	}
 
 	cr, err := history.NewControllerRevision(ud,

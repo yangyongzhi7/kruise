@@ -19,28 +19,32 @@ package broadcastjob
 
 import (
 	"context"
+	"flag"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
-	"github.com/openkruise/kruise/pkg/util/gate"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util"
+	utildiscovery "github.com/openkruise/kruise/pkg/util/discovery"
+	"github.com/openkruise/kruise/pkg/util/expectations"
+	"github.com/openkruise/kruise/pkg/util/ratelimiter"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog"
 	kubecontroller "k8s.io/kubernetes/pkg/controller"
-	"k8s.io/kubernetes/pkg/scheduler/algorithm"
+	daemonsetutil "k8s.io/kubernetes/pkg/controller/daemon/util"
 	"k8s.io/kubernetes/pkg/scheduler/algorithm/predicates"
-	schedulercache "k8s.io/kubernetes/pkg/scheduler/cache"
+	schedulernodeinfo "k8s.io/kubernetes/pkg/scheduler/nodeinfo"
 	"k8s.io/utils/integer"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -50,12 +54,27 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-var controllerKind = appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")
+func init() {
+	flag.BoolVar(&scheduleBroadcastJobPods, "assign-bcj-pods-by-scheduler", true, "Use scheduler to assign broadcastJob pod to node.")
+	flag.IntVar(&concurrentReconciles, "broadcastjob-workers", concurrentReconciles, "Max concurrent workers for BroadCastJob controller.")
+}
+
+const (
+	JobNameLabelKey       = "broadcastjob-name"
+	ControllerUIDLabelKey = "broadcastjob-controller-uid"
+)
+
+var (
+	concurrentReconciles     = 3
+	scheduleBroadcastJobPods bool
+	controllerKind           = appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")
+	scaleExpectations        = expectations.NewScaleExpectations()
+)
 
 // Add creates a new BroadcastJob Controller and adds it to the Manager with default RBAC. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
 func Add(mgr manager.Manager) error {
-	if !gate.ResourceEnabled(&appsv1alpha1.BroadcastJob{}) {
+	if !utildiscovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
 	return add(mgr, newReconciler(mgr))
@@ -63,9 +82,9 @@ func Add(mgr manager.Manager) error {
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager) reconcile.Reconciler {
-	recorder := mgr.GetRecorder("broadcastjob-controller")
+	recorder := mgr.GetEventRecorderFor("broadcastjob-controller")
 	return &ReconcileBroadcastJob{
-		Client:   mgr.GetClient(),
+		Client:   util.NewClientFromManager(mgr, "broadcastjob-controller"),
 		scheme:   mgr.GetScheme(),
 		recorder: recorder,
 	}
@@ -74,7 +93,9 @@ func newReconciler(mgr manager.Manager) reconcile.Reconciler {
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	// Create a new controller
-	c, err := controller.New("broadcastjob-controller", mgr, controller.Options{Reconciler: r})
+	c, err := controller.New("broadcastjob-controller", mgr, controller.Options{
+		Reconciler: r, MaxConcurrentReconciles: concurrentReconciles,
+		RateLimiter: ratelimiter.DefaultControllerRateLimiter()})
 	if err != nil {
 		return err
 	}
@@ -85,17 +106,19 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
-	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &handler.EnqueueRequestForOwner{
-		IsController: true,
-		OwnerType:    &appsv1alpha1.BroadcastJob{},
+	// Wathc for changes to Pod
+	err = c.Watch(&source.Kind{Type: &corev1.Pod{}}, &podEventHandler{
+		enqueueHandler: handler.EnqueueRequestForOwner{
+			IsController: true,
+			OwnerType:    &appsv1alpha1.BroadcastJob{},
+		},
 	})
-
 	if err != nil {
 		return err
 	}
 
-	// Watch for changes to Pod
-	if err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{client: mgr.GetClient()}); err != nil {
+	// Watch for changes to Node
+	if err = c.Watch(&source.Kind{Type: &corev1.Node{}}, &enqueueBroadcastJobForNode{reader: mgr.GetCache()}); err != nil {
 		return err
 	}
 	return nil
@@ -112,14 +135,14 @@ type ReconcileBroadcastJob struct {
 	podModifier func(pod *corev1.Pod)
 }
 
-// Reconcile reads that state of the cluster for a BroadcastJob object and makes changes based on the state read
-// and what is in the BroadcastJob.Spec
-// Automatically generate RBAC rules to allow the Controller to read and write Deployments
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=broadcastjobs/status,verbs=get;update;patch
+
+// Reconcile reads that state of the cluster for a BroadcastJob object and makes changes based on the state read
+// and what is in the BroadcastJob.Spec
 func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.Result, error) {
 	// Fetch the BroadcastJob instance
 	job := &appsv1alpha1.BroadcastJob{}
@@ -129,12 +152,23 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 		if errors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
+			scaleExpectations.DeleteExpectations(request.String())
 			return reconcile.Result{}, nil
 		}
 		// Error reading the object - requeue the request.
 		klog.Errorf("failed to get job %s,", job.Name)
 		return reconcile.Result{}, err
 	}
+
+	if scaleSatisfied, unsatisfiedDuration, scaleDirtyPods := scaleExpectations.SatisfiedExpectations(request.String()); !scaleSatisfied {
+		if unsatisfiedDuration >= expectations.ExpectationTimeout {
+			klog.Warningf("Expectation unsatisfied overtime for bcj %v, scaleDirtyPods=%v, overtime=%v", request.String(), scaleDirtyPods, unsatisfiedDuration)
+			return reconcile.Result{}, nil
+		}
+		klog.V(4).Infof("Not satisfied scale for bcj %v, scaleDirtyPods=%v", request.String(), scaleDirtyPods)
+		return reconcile.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}, nil
+	}
+
 	// Add pre-defined labels to pod template
 	addLabelToPodTemplate(job)
 
@@ -170,9 +204,11 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 
 	// list pods for this job
 	podList := &corev1.PodList{}
-	listOptions := client.InNamespace(request.Namespace)
-	listOptions.MatchingLabels(labelsAsMap(job))
-	err = r.List(context.TODO(), listOptions, podList)
+	listOptions := &client.ListOptions{
+		Namespace:     request.Namespace,
+		LabelSelector: labels.SelectorFromSet(labelsAsMap(job)),
+	}
+	err = r.List(context.TODO(), podList, listOptions)
 	if err != nil {
 		klog.Errorf("failed to get podList for job %s,", job.Name)
 		return reconcile.Result{}, err
@@ -181,14 +217,18 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 	// convert pod list to a slice of pointers
 	var pods []*corev1.Pod
 	for i := range podList.Items {
-		pods = append(pods, &podList.Items[i])
+		pod := &podList.Items[i]
+		controllerRef := metav1.GetControllerOf(pod)
+		if controllerRef != nil && controllerRef.Kind == job.Kind && controllerRef.UID == job.UID {
+			pods = append(pods, pod)
+		}
 	}
 
 	// Get the map (nodeName -> Pod) for pods with node assigned
 	existingNodeToPodMap := r.getNodeToPodMap(pods, job)
 	// list all nodes in cluster
 	nodes := &corev1.NodeList{}
-	err = r.List(context.TODO(), &client.ListOptions{}, nodes)
+	err = r.List(context.TODO(), nodes)
 	if err != nil {
 		klog.Errorf("failed to get nodeList for job %s,", job.Name)
 		return reconcile.Result{}, err
@@ -218,7 +258,7 @@ func (r *ReconcileBroadcastJob) Reconcile(request reconcile.Request) (reconcile.
 		job.Status.Phase = appsv1alpha1.PhasePaused
 		return reconcile.Result{RequeueAfter: requeueAfter}, r.updateJobStatus(request, job)
 	}
-	if job.Spec.Paused == false && job.Status.Phase == appsv1alpha1.PhasePaused {
+	if !job.Spec.Paused && job.Status.Phase == appsv1alpha1.PhasePaused {
 		job.Status.Phase = appsv1alpha1.PhaseRunning
 		r.recorder.Event(job, corev1.EventTypeNormal, "Continue", "continue to process job")
 	}
@@ -347,25 +387,15 @@ func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
 
 	// max concurrent running pods
 	var parallelism int32
-	if job.Spec.Parallelism == nil {
-		// not specify,take the max int
-		parallelism = int32(1<<31 - 1)
-	} else {
-		parallelismIntStr := *job.Spec.Parallelism
-		if parallelismIntStr.Type == intstr.String {
-			absolute, err := percentageToAbsolute(parallelismIntStr.StrVal)
-			if err != nil {
-				return active, err
-			}
-			parallelism = int32(math.Ceil(float64(int32(absolute)*desired) / 100))
-		} else {
-			parallelism = parallelismIntStr.IntVal
-		}
+	var err error
+	parallelismInt, err := intstr.GetValueFromIntOrPercent(intstr.ValueOrDefault(job.Spec.Parallelism, intstr.FromInt(1<<31-1)), int(desired), true)
+	if err != nil {
+		return active, err
 	}
+	parallelism = int32(parallelismInt)
 
 	// The rest pods to run
 	rest := int32(len(restNodesToRunPod))
-	var err error
 	var errCh chan error
 	if active > parallelism {
 		// exceed parallelism limit
@@ -388,7 +418,7 @@ func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
 		errCh = make(chan error, diff)
 		wait := sync.WaitGroup{}
 		startIndex := int32(0)
-		for batchSize := int32(integer.Int32Min(diff, kubecontroller.SlowStartInitialBatchSize)); diff > 0; batchSize = integer.Int32Min(2*batchSize, diff) {
+		for batchSize := integer.Int32Min(diff, kubecontroller.SlowStartInitialBatchSize); diff > 0; batchSize = integer.Int32Min(2*batchSize, diff) {
 			// count of errors in current error channel
 			errorCount := len(errCh)
 			wait.Add(int(batchSize))
@@ -400,7 +430,7 @@ func (r *ReconcileBroadcastJob) reconcilePods(job *appsv1alpha1.BroadcastJob,
 					defer wait.Done()
 					// parallelize pod creation
 					klog.Infof("creating pod on node %s", nodeName)
-					err := r.createPodsOnNode(nodeName, job.Namespace, &job.Spec.Template, job, asOwner(job))
+					err := r.createPodOnNode(nodeName, job.Namespace, &job.Spec.Template, job, asOwner(job))
 					if err != nil && errors.IsTimeout(err) {
 						// Pod is created but its initialization has timed out.
 						// If the initialization is successful eventually, the
@@ -544,8 +574,8 @@ func (r *ReconcileBroadcastJob) getNodeToPodMap(pods []*corev1.Pod, job *appsv1a
 
 func labelsAsMap(job *appsv1alpha1.BroadcastJob) map[string]string {
 	return map[string]string{
-		"job-name":       job.Name,
-		"controller-uid": string(job.UID),
+		JobNameLabelKey:       job.Name,
+		ControllerUIDLabelKey: string(job.UID),
 	}
 }
 
@@ -555,8 +585,9 @@ func labelsAsMap(job *appsv1alpha1.BroadcastJob) map[string]string {
 //   - PodMatchNodeSelector: checks pod's NodeSelector and NodeAffinity against node
 //   - PodToleratesNodeTaints: exclude tainted node unless pod has specific toleration
 //   - CheckNodeUnschedulablePredicate: check if the pod can tolerate node unschedulable
+//   - PodFitsResources: checks if a node has sufficient resources, such as cpu, memory, gpu, opaque int resources etc to run a pod.
 func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
-	nodeInfo := schedulercache.NewNodeInfo()
+	nodeInfo := schedulernodeinfo.NewNodeInfo()
 	_ = nodeInfo.SetNode(node)
 
 	fit, reasons, err := predicates.PodFitsHost(pod, nil, nodeInfo)
@@ -582,10 +613,15 @@ func checkNodeFitness(pod *corev1.Pod, node *corev1.Node) (bool, error) {
 		logPredicateFailedReason(reasons, node)
 		return false, err
 	}
+	fit, reasons, err = predicates.PodFitsResources(pod, nil, nodeInfo)
+	if err != nil || !fit {
+		logPredicateFailedReason(reasons, node)
+		return false, err
+	}
 	return true, nil
 }
 
-func logPredicateFailedReason(reasons []algorithm.PredicateFailureReason, node *corev1.Node) {
+func logPredicateFailedReason(reasons []predicates.PredicateFailureReason, node *corev1.Node) {
 	if len(reasons) == 0 {
 		return
 	}
@@ -612,7 +648,10 @@ func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, po
 	for i := int32(0); i < int32(nbPods); i++ {
 		go func(ix int32) {
 			defer wait.Done()
+			key := types.NamespacedName{Namespace: job.Namespace, Name: job.Name}.String()
+			scaleExpectations.ExpectScale(key, expectations.Delete, pods[ix].Spec.NodeName)
 			if err := r.Delete(context.TODO(), pods[ix]); err != nil {
+				scaleExpectations.ObserveScale(key, expectations.Delete, pods[ix].Spec.NodeName)
 				defer utilruntime.HandleError(err)
 				klog.Infof("Failed to delete %v, job %q/%q", pods[ix].Name, job.Namespace, job.Name)
 				errCh <- err
@@ -634,21 +673,28 @@ func (r *ReconcileBroadcastJob) deleteJobPods(job *appsv1alpha1.BroadcastJob, po
 	return failed, active, manageJobErr
 }
 
-func (r *ReconcileBroadcastJob) createPodsOnNode(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
+func (r *ReconcileBroadcastJob) createPodOnNode(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	if err := validateControllerRef(controllerRef); err != nil {
 		return err
 	}
-	return r.createPods(nodeName, namespace, template, object, controllerRef)
+	return r.createPod(nodeName, namespace, template, object, controllerRef)
 }
 
-func (r *ReconcileBroadcastJob) createPods(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
+func (r *ReconcileBroadcastJob) createPod(nodeName, namespace string, template *corev1.PodTemplateSpec, object runtime.Object, controllerRef *metav1.OwnerReference) error {
 	pod, err := kubecontroller.GetPodFromTemplate(template, object, controllerRef)
 	if err != nil {
 		return err
 	}
 	pod.Namespace = namespace
-	if len(nodeName) != 0 {
-		pod.Spec.NodeName = nodeName
+	if scheduleBroadcastJobPods {
+		// The pod's NodeAffinity will be updated to make sure the Pod is bound
+		// to the target node by default scheduler. It is safe to do so because there
+		// should be no conflicting node affinity with the target node.
+		pod.Spec.Affinity = daemonsetutil.ReplaceDaemonSetPodNodeNameNodeAffinity(pod.Spec.Affinity, nodeName)
+	} else {
+		if len(nodeName) != 0 {
+			pod.Spec.NodeName = nodeName
+		}
 	}
 	if labels.Set(pod.Labels).AsSelectorPreValidated().Empty() {
 		return fmt.Errorf("unable to create pods, no labels")
@@ -658,7 +704,13 @@ func (r *ReconcileBroadcastJob) createPods(nodeName, namespace string, template 
 	if r.podModifier != nil {
 		r.podModifier(pod)
 	}
+
+	key := types.NamespacedName{Namespace: namespace, Name: controllerRef.Name}.String()
+	// Pod.Name is empty since the Pod uses generated name. We use nodeName as the unique identity
+	// since each node should only contain one job Pod.
+	scaleExpectations.ExpectScale(key, expectations.Create, nodeName)
 	if err := r.Client.Create(context.TODO(), pod); err != nil {
+		scaleExpectations.ObserveScale(key, expectations.Create, nodeName)
 		r.recorder.Eventf(object, corev1.EventTypeWarning, kubecontroller.FailedCreatePodReason, "Error creating: %v", err)
 		return err
 	}

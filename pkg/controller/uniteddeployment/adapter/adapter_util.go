@@ -23,7 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 )
 
 func getSubsetPrefix(controllerName, subsetName string) string {
@@ -72,9 +72,7 @@ func attachTolerations(podSpec *corev1.PodSpec, subsetConfig *appsv1alpha1.Subse
 		podSpec.Tolerations = []corev1.Toleration{}
 	}
 
-	for _, toleration := range subsetConfig.Tolerations {
-		podSpec.Tolerations = append(podSpec.Tolerations, toleration)
-	}
+	podSpec.Tolerations = append(podSpec.Tolerations, subsetConfig.Tolerations...)
 }
 
 func getRevision(objMeta metav1.Object) string {

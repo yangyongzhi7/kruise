@@ -21,10 +21,13 @@ import (
 	"fmt"
 	"testing"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	"k8s.io/apimachinery/pkg/labels"
+
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -85,7 +88,7 @@ func TestReconcileJobCreatePodAbsolute(t *testing.T) {
 
 	podList := &v1.PodList{}
 	listOptions := client.InNamespace(request.Namespace)
-	err = reconcileJob.List(context.TODO(), listOptions, podList)
+	err = reconcileJob.List(context.TODO(), podList, listOptions)
 	assert.NoError(t, err)
 
 	// 2 pods active
@@ -93,7 +96,7 @@ func TestReconcileJobCreatePodAbsolute(t *testing.T) {
 	// 1 new pod created, because parallelism is 2,
 	assert.Equal(t, 2, len(podList.Items))
 	// The new pod has the job-name label
-	assert.Equal(t, "job1", podList.Items[0].Labels["job-name"])
+	assert.Equal(t, "job1", podList.Items[0].Labels[JobNameLabelKey])
 	// 3 desired pods, one for each node
 	assert.Equal(t, int32(3), retrievedJob.Status.Desired)
 	assert.NotNil(t, retrievedJob.Status.StartTime)
@@ -112,10 +115,10 @@ func TestReconcileJobCreatePodPercentage(t *testing.T) {
 
 	p := intstr.FromString("40%")
 	// A job
-	job1 := createJob("job1", p)
+	job := createJob("job2", p)
 
-	// A POD for job1 running on node1
-	job1Pod1onNode1 := createPod(job1, "job1pod1node1", "node1", v1.PodRunning)
+	// A POD for job running on node1
+	jobPod1onNode1 := createPod(job, "jobpod1node1", "node1", v1.PodRunning)
 
 	// Node1 has 1 pod running
 	node1 := createNode("node1")
@@ -128,11 +131,11 @@ func TestReconcileJobCreatePodPercentage(t *testing.T) {
 	// Node3 does not have pod running
 	node5 := createNode("node5")
 
-	reconcileJob := createReconcileJob(scheme, job1, job1Pod1onNode1, node1, node2, node3, node4, node5)
+	reconcileJob := createReconcileJob(scheme, job, jobPod1onNode1, node1, node2, node3, node4, node5)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job2",
 			Namespace: "default",
 		},
 	}
@@ -145,7 +148,7 @@ func TestReconcileJobCreatePodPercentage(t *testing.T) {
 
 	podList := &v1.PodList{}
 	listOptions := client.InNamespace(request.Namespace)
-	err = reconcileJob.List(context.TODO(), listOptions, podList)
+	err = reconcileJob.List(context.TODO(), podList, listOptions)
 	assert.NoError(t, err)
 
 	// 2 pods active
@@ -153,7 +156,7 @@ func TestReconcileJobCreatePodPercentage(t *testing.T) {
 	// 1 new pod created, because parallelism is 2,
 	assert.Equal(t, 2, len(podList.Items))
 	// The new pod has the job-name label
-	assert.Equal(t, "job1", podList.Items[0].Labels["job-name"])
+	assert.Equal(t, "job2", podList.Items[0].Labels[JobNameLabelKey])
 	// 3 desired pods, one for each node
 	assert.Equal(t, int32(5), retrievedJob.Status.Desired)
 	assert.NotNil(t, retrievedJob.Status.StartTime)
@@ -170,7 +173,7 @@ func TestPodsOnUnschedulableNodes(t *testing.T) {
 
 	p := intstr.FromInt(2)
 	// A job
-	job1 := createJob("job1", p)
+	job := createJob("job3", p)
 
 	// Create Node1 with Unschedulable to true
 	node1 := createNode("node1")
@@ -179,10 +182,10 @@ func TestPodsOnUnschedulableNodes(t *testing.T) {
 	// Create node2
 	node2 := createNode("node2")
 
-	reconcileJob := createReconcileJob(scheme, job1, node1, node2)
+	reconcileJob := createReconcileJob(scheme, job, node1, node2)
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job3",
 			Namespace: "default",
 		},
 	}
@@ -196,7 +199,7 @@ func TestPodsOnUnschedulableNodes(t *testing.T) {
 
 	podList := &v1.PodList{}
 	listOptions := client.InNamespace(request.Namespace)
-	err = reconcileJob.List(context.TODO(), listOptions, podList)
+	err = reconcileJob.List(context.TODO(), podList, listOptions)
 	assert.NoError(t, err)
 
 	// 1 pod active on node2,  node1 is unschedulable hence no pod
@@ -216,17 +219,17 @@ func TestReconcileJobMultipleBatches(t *testing.T) {
 
 	p := intstr.FromInt(20)
 	// A job
-	job1 := createJob("job1", p)
+	job := createJob("job4", p)
 
 	var objList []runtime.Object
-	objList = append(objList, job1)
+	objList = append(objList, job)
 	for i := 0; i < 10; i++ {
 		objList = append(objList, createNode(fmt.Sprintf("node-%d", i)))
 	}
 	reconcileJob := createReconcileJob(scheme, objList...)
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job4",
 			Namespace: "default",
 		},
 	}
@@ -241,9 +244,11 @@ func TestReconcileJobMultipleBatches(t *testing.T) {
 	assert.Equal(t, int32(10), retrievedJob.Status.Active)
 
 	podList := &v1.PodList{}
-	listOptions := client.InNamespace(request.Namespace)
-	listOptions.MatchingLabels(labelsAsMap(job1))
-	err = reconcileJob.List(context.TODO(), listOptions, podList)
+	listOptions := &client.ListOptions{
+		Namespace:     request.Namespace,
+		LabelSelector: labels.SelectorFromSet(labelsAsMap(job)),
+	}
+	err = reconcileJob.List(context.TODO(), podList, listOptions)
 	assert.NoError(t, err)
 
 	// 10 new pods created
@@ -259,8 +264,8 @@ func TestJobFailed(t *testing.T) {
 
 	// A job
 	p := intstr.FromInt(10)
-	job1 := createJob("job1", p)
-	job1.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeFailFast
+	job := createJob("job5", p)
+	job.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeFailFast
 
 	// Create 3 nodes
 	// Node1 has 1 pod running
@@ -271,15 +276,15 @@ func TestJobFailed(t *testing.T) {
 	node3 := createNode("node3")
 
 	// Create 3 pods, 2 succeeded, 1 failed
-	pod1onNode1 := createPod(job1, "pod1node1", "node1", v1.PodSucceeded)
-	pod2onNode2 := createPod(job1, "pod2node2", "node2", v1.PodSucceeded)
-	pod3onNode3 := createPod(job1, "pod3node3", "node3", v1.PodFailed)
+	pod1onNode1 := createPod(job, "pod1node1", "node1", v1.PodSucceeded)
+	pod2onNode2 := createPod(job, "pod2node2", "node2", v1.PodSucceeded)
+	pod3onNode3 := createPod(job, "pod3node3", "node3", v1.PodFailed)
 
-	reconcileJob := createReconcileJob(scheme, job1, pod1onNode1, pod2onNode2, pod3onNode3, node1, node2, node3)
+	reconcileJob := createReconcileJob(scheme, job, pod1onNode1, pod2onNode2, pod3onNode3, node1, node2, node3)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job5",
 			Namespace: "default",
 		},
 	}
@@ -311,8 +316,8 @@ func TestJobFailurePolicyTypeContinue(t *testing.T) {
 
 	// A job
 	p := intstr.FromInt(10)
-	job1 := createJob("job1", p)
-	job1.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeContinue
+	job := createJob("job6", p)
+	job.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeContinue
 
 	// Create 3 nodes
 	// Node1 has 1 pod running
@@ -323,14 +328,14 @@ func TestJobFailurePolicyTypeContinue(t *testing.T) {
 	node3 := createNode("node3")
 
 	// Create 3 pods, 2 succeeded, 1 failed
-	pod1onNode1 := createPod(job1, "pod1node1", "node1", v1.PodSucceeded)
-	pod3onNode3 := createPod(job1, "pod3node3", "node3", v1.PodFailed)
+	pod1onNode1 := createPod(job, "pod1node1", "node1", v1.PodSucceeded)
+	pod3onNode3 := createPod(job, "pod3node3", "node3", v1.PodFailed)
 
-	reconcileJob := createReconcileJob(scheme, job1, pod1onNode1, pod3onNode3, node1, node2, node3)
+	reconcileJob := createReconcileJob(scheme, job, pod1onNode1, pod3onNode3, node1, node2, node3)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job6",
 			Namespace: "default",
 		},
 	}
@@ -358,8 +363,8 @@ func TestJobFailurePolicyTypeFailFast(t *testing.T) {
 
 	// A job
 	p := intstr.FromInt(10)
-	job1 := createJob("job1", p)
-	job1.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeFailFast
+	job := createJob("job7", p)
+	job.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypeFailFast
 
 	// Create 3 nodes
 	// Node1 has 1 pod running
@@ -370,14 +375,14 @@ func TestJobFailurePolicyTypeFailFast(t *testing.T) {
 	node3 := createNode("node3")
 
 	// Create 3 pods, 2 succeeded, 1 failed
-	pod1onNode1 := createPod(job1, "pod1node1", "node1", v1.PodSucceeded)
-	pod3onNode3 := createPod(job1, "pod3node3", "node3", v1.PodFailed)
+	pod1onNode1 := createPod(job, "pod1node1", "node1", v1.PodSucceeded)
+	pod3onNode3 := createPod(job, "pod3node3", "node3", v1.PodFailed)
 
-	reconcileJob := createReconcileJob(scheme, job1, pod1onNode1, pod3onNode3, node1, node2, node3)
+	reconcileJob := createReconcileJob(scheme, job, pod1onNode1, pod3onNode3, node1, node2, node3)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job7",
 			Namespace: "default",
 		},
 	}
@@ -405,8 +410,8 @@ func TestJobFailurePolicyPause(t *testing.T) {
 
 	// A job
 	p := intstr.FromInt(10)
-	job1 := createJob("job1", p)
-	job1.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypePause
+	job := createJob("job8", p)
+	job.Spec.FailurePolicy.Type = appsv1alpha1.FailurePolicyTypePause
 
 	// Create 3 nodes
 	// Node1 has 1 pod running
@@ -417,14 +422,14 @@ func TestJobFailurePolicyPause(t *testing.T) {
 	node3 := createNode("node3")
 
 	// Create 2 pods, 1 succeeded, 1 failed
-	pod1onNode1 := createPod(job1, "pod1node1", "node1", v1.PodSucceeded)
-	pod2onNode2 := createPod(job1, "pod2node2", "node2", v1.PodFailed)
+	pod1onNode1 := createPod(job, "pod1node1", "node1", v1.PodSucceeded)
+	pod2onNode2 := createPod(job, "pod2node2", "node2", v1.PodFailed)
 
-	reconcileJob := createReconcileJob(scheme, job1, pod1onNode1, pod2onNode2, node1, node2, node3)
+	reconcileJob := createReconcileJob(scheme, job, pod1onNode1, pod2onNode2, node1, node2, node3)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job8",
 			Namespace: "default",
 		},
 	}
@@ -453,23 +458,23 @@ func TestJobSetPaused(t *testing.T) {
 
 	p := intstr.FromString("50%")
 	// A job
-	job1 := createJob("job1", p)
-	job1.Spec.Paused = true
+	job := createJob("job9", p)
+	job.Spec.Paused = true
 
 	var objList []runtime.Object
-	objList = append(objList, job1)
+	objList = append(objList, job)
 	for i := 0; i < 10; i++ {
 		objList = append(objList, createNode(fmt.Sprintf("node-%d", i)))
 	}
 	// Create 3 succeeded pods
 	for i := 0; i < 3; i++ {
-		objList = append(objList, createPod(job1, fmt.Sprintf("pod%dnode%d", i, i), fmt.Sprintf("node%d", i), v1.PodRunning))
+		objList = append(objList, createPod(job, fmt.Sprintf("pod%dnode%d", i, i), fmt.Sprintf("node%d", i), v1.PodRunning))
 	}
 
 	reconcileJob := createReconcileJob(scheme, objList...)
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job9",
 			Namespace: "default",
 		},
 	}
@@ -499,9 +504,9 @@ func TestJobFailedAfterActiveDeadline(t *testing.T) {
 	// activeDeadline is set 0, to make job fail
 	activeDeadline := int64(0)
 	now := metav1.Now()
-	job1 := &appsv1alpha1.BroadcastJob{
+	job := &appsv1alpha1.BroadcastJob{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "job1",
+			Name:      "job10",
 			Namespace: "default",
 			UID:       "12345",
 			SelfLink:  "/apis/apps.kruise.io/v1alpha1/namespaces/default/broadcastjobs/test",
@@ -524,14 +529,14 @@ func TestJobFailedAfterActiveDeadline(t *testing.T) {
 	node2 := createNode("node2")
 
 	// two POD for job1 running on node1, node2
-	job1Pod1onNode1 := createPod(job1, "job1pod1node1", "node1", v1.PodRunning)
-	job1Pod2onNode1 := createPod(job1, "job1pod2node2", "node2", v1.PodRunning)
+	job1Pod1onNode1 := createPod(job, "job1pod1node1", "node1", v1.PodRunning)
+	job1Pod2onNode1 := createPod(job, "job1pod2node2", "node2", v1.PodRunning)
 
-	reconcileJob := createReconcileJob(scheme, job1, job1Pod1onNode1, job1Pod2onNode1, node1, node2)
+	reconcileJob := createReconcileJob(scheme, job, job1Pod1onNode1, job1Pod2onNode1, node1, node2)
 
 	request := reconcile.Request{
 		NamespacedName: types.NamespacedName{
-			Name:      "job1",
+			Name:      "job10",
 			Namespace: "default",
 		},
 	}
@@ -552,7 +557,7 @@ func TestJobFailedAfterActiveDeadline(t *testing.T) {
 	// The active pods are deleted
 	podList := &v1.PodList{}
 	listOptions := client.InNamespace(request.Namespace)
-	err = reconcileJob.List(context.TODO(), listOptions, podList)
+	err = reconcileJob.List(context.TODO(), podList, listOptions)
 	assert.NoError(t, err)
 	assert.Equal(t, 0, len(podList.Items))
 }
@@ -574,6 +579,11 @@ func createNode(nodeName string) *v1.Node {
 	node3 := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: nodeName,
+		},
+		Status: v1.NodeStatus{
+			Allocatable: v1.ResourceList{
+				"pods": resource.MustParse("10"),
+			},
 		},
 	}
 	return node3
@@ -601,6 +611,9 @@ func createPod(job1 *appsv1alpha1.BroadcastJob, podName, nodeName string, phase 
 			Name:      podName,
 			Labels:    labelsAsMap(job1),
 			Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(job1, appsv1alpha1.SchemeGroupVersion.WithKind("BroadcastJob")),
+			},
 		},
 		Spec: v1.PodSpec{
 			NodeName: nodeName,

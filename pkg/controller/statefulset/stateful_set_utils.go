@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"time"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -34,9 +34,11 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/history"
+
+	appsv1beta1 "github.com/openkruise/kruise/apis/apps/v1beta1"
 )
 
-var patchCodec = scheme.Codecs.LegacyCodec(appsv1alpha1.SchemeGroupVersion)
+var patchCodec = scheme.Codecs.LegacyCodec(appsv1beta1.SchemeGroupVersion)
 
 // statefulPodRegex is a regular expression that extracts the parent StatefulSet and ordinal from the Name of a Pod
 var statefulPodRegex = regexp.MustCompile("(.*)-([0-9]+)$")
@@ -71,24 +73,24 @@ func getOrdinal(pod *v1.Pod) int {
 }
 
 // getPodName gets the name of set's child Pod with an ordinal index of ordinal
-func getPodName(set *appsv1alpha1.StatefulSet, ordinal int) string {
+func getPodName(set *appsv1beta1.StatefulSet, ordinal int) string {
 	return fmt.Sprintf("%s-%d", set.Name, ordinal)
 }
 
 // getPersistentVolumeClaimName gets the name of PersistentVolumeClaim for a Pod with an ordinal index of ordinal. claim
 // must be a PersistentVolumeClaim from set's VolumeClaims template.
-func getPersistentVolumeClaimName(set *appsv1alpha1.StatefulSet, claim *v1.PersistentVolumeClaim, ordinal int) string {
+func getPersistentVolumeClaimName(set *appsv1beta1.StatefulSet, claim *v1.PersistentVolumeClaim, ordinal int) string {
 	// NOTE: This name format is used by the heuristics for zone spreading in ChooseZoneForVolume
 	return fmt.Sprintf("%s-%s-%d", claim.Name, set.Name, ordinal)
 }
 
 // isMemberOf tests if pod is a member of set.
-func isMemberOf(set *appsv1alpha1.StatefulSet, pod *v1.Pod) bool {
+func isMemberOf(set *appsv1beta1.StatefulSet, pod *v1.Pod) bool {
 	return getParentName(pod) == set.Name
 }
 
 // identityMatches returns true if pod has a valid identity and network identity for a member of set.
-func identityMatches(set *appsv1alpha1.StatefulSet, pod *v1.Pod) bool {
+func identityMatches(set *appsv1beta1.StatefulSet, pod *v1.Pod) bool {
 	parent, ordinal := getParentNameAndOrdinal(pod)
 	return ordinal >= 0 &&
 		set.Name == parent &&
@@ -98,7 +100,7 @@ func identityMatches(set *appsv1alpha1.StatefulSet, pod *v1.Pod) bool {
 }
 
 // storageMatches returns true if pod's Volumes cover the set of PersistentVolumeClaims
-func storageMatches(set *appsv1alpha1.StatefulSet, pod *v1.Pod) bool {
+func storageMatches(set *appsv1beta1.StatefulSet, pod *v1.Pod) bool {
 	ordinal := getOrdinal(pod)
 	if ordinal < 0 {
 		return false
@@ -122,7 +124,7 @@ func storageMatches(set *appsv1alpha1.StatefulSet, pod *v1.Pod) bool {
 // getPersistentVolumeClaims gets a map of PersistentVolumeClaims to their template names, as defined in set. The
 // returned PersistentVolumeClaims are each constructed with a the name specific to the Pod. This name is determined
 // by getPersistentVolumeClaimName.
-func getPersistentVolumeClaims(set *appsv1alpha1.StatefulSet, pod *v1.Pod) map[string]v1.PersistentVolumeClaim {
+func getPersistentVolumeClaims(set *appsv1beta1.StatefulSet, pod *v1.Pod) map[string]v1.PersistentVolumeClaim {
 	ordinal := getOrdinal(pod)
 	templates := set.Spec.VolumeClaimTemplates
 	claims := make(map[string]v1.PersistentVolumeClaim, len(templates))
@@ -138,7 +140,7 @@ func getPersistentVolumeClaims(set *appsv1alpha1.StatefulSet, pod *v1.Pod) map[s
 
 // updateStorage updates pod's Volumes to conform with the PersistentVolumeClaim of set's templates. If pod has
 // conflicting local Volumes these are replaced with Volumes that conform to the set's templates.
-func updateStorage(set *appsv1alpha1.StatefulSet, pod *v1.Pod) {
+func updateStorage(set *appsv1beta1.StatefulSet, pod *v1.Pod) {
 	currentVolumes := pod.Spec.Volumes
 	claims := getPersistentVolumeClaims(set, pod)
 	newVolumes := make([]v1.Volume, 0, len(claims))
@@ -162,7 +164,7 @@ func updateStorage(set *appsv1alpha1.StatefulSet, pod *v1.Pod) {
 	pod.Spec.Volumes = newVolumes
 }
 
-func initIdentity(set *appsv1alpha1.StatefulSet, pod *v1.Pod) {
+func initIdentity(set *appsv1beta1.StatefulSet, pod *v1.Pod) {
 	updateIdentity(set, pod)
 	// Set these immutable fields only on initial Pod creation, not updates.
 	pod.Spec.Hostname = pod.Name
@@ -171,13 +173,37 @@ func initIdentity(set *appsv1alpha1.StatefulSet, pod *v1.Pod) {
 
 // updateIdentity updates pod's name, hostname, and subdomain, and StatefulSetPodNameLabel to conform to set's name
 // and headless service.
-func updateIdentity(set *appsv1alpha1.StatefulSet, pod *v1.Pod) {
+func updateIdentity(set *appsv1beta1.StatefulSet, pod *v1.Pod) {
 	pod.Name = getPodName(set, getOrdinal(pod))
 	pod.Namespace = set.Namespace
 	if pod.Labels == nil {
 		pod.Labels = make(map[string]string)
 	}
 	pod.Labels[apps.StatefulSetPodNameLabel] = pod.Name
+}
+
+// isRunningAndAvailable returns true if pod is in the PodRunning Phase,
+// and it has a condition of PodReady for a minimum of minReadySeconds.
+// return true if it's available
+// return false with zero means it's not ready
+// return false with a positive value means it's not available and should recheck with that time
+func isRunningAndAvailable(pod *v1.Pod, minReadySeconds int32) (bool, time.Duration) {
+	if pod.Status.Phase != v1.PodRunning || !podutil.IsPodReady(pod) {
+		return false, 0
+	}
+	c := podutil.GetPodReadyCondition(pod.Status)
+	minReadySecondsDuration := time.Duration(minReadySeconds) * time.Second
+	if minReadySeconds == 0 {
+		return true, 0
+	}
+	if c.LastTransitionTime.IsZero() {
+		return false, minReadySecondsDuration
+	}
+	waitTime := c.LastTransitionTime.Time.Add(minReadySecondsDuration).Sub(time.Now())
+	if waitTime > 0 {
+		return false, waitTime
+	}
+	return true, 0
 }
 
 // isRunningAndReady returns true if pod is in the PodRunning Phase, if it has a condition of PodReady.
@@ -206,8 +232,17 @@ func isHealthy(pod *v1.Pod) bool {
 }
 
 // allowsBurst is true if the alpha burst annotation is set.
-func allowsBurst(set *appsv1alpha1.StatefulSet) bool {
+func allowsBurst(set *appsv1beta1.StatefulSet) bool {
 	return set.Spec.PodManagementPolicy == apps.ParallelPodManagement
+}
+
+// getMinReadySeconds returns the minReadySeconds set in the rollingUpdate, default is 0
+func getMinReadySeconds(set *appsv1beta1.StatefulSet) int32 {
+	if set.Spec.UpdateStrategy.RollingUpdate == nil ||
+		set.Spec.UpdateStrategy.RollingUpdate.MinReadySeconds == nil {
+		return 0
+	}
+	return *set.Spec.UpdateStrategy.RollingUpdate.MinReadySeconds
 }
 
 // setPodRevision sets the revision of Pod to revision by adding the StatefulSetRevisionLabel
@@ -228,7 +263,7 @@ func getPodRevision(pod *v1.Pod) string {
 }
 
 // newStatefulSetPod returns a new Pod conforming to the set's Spec with an identity generated from ordinal.
-func newStatefulSetPod(set *appsv1alpha1.StatefulSet, ordinal int) *v1.Pod {
+func newStatefulSetPod(set *appsv1beta1.StatefulSet, ordinal int) *v1.Pod {
 	pod, _ := controller.GetPodFromTemplate(&set.Spec.Template, set, metav1.NewControllerRef(set, controllerKind))
 	pod.Name = getPodName(set, ordinal)
 	initIdentity(set, pod)
@@ -240,7 +275,7 @@ func newStatefulSetPod(set *appsv1alpha1.StatefulSet, ordinal int) *v1.Pod {
 // current revision. updateSet is the representation of the set at the updateRevision. currentRevision is the name of
 // the current revision. updateRevision is the name of the update revision. ordinal is the ordinal of the Pod. If the
 // returned error is nil, the returned Pod is valid.
-func newVersionedStatefulSetPod(currentSet, updateSet *appsv1alpha1.StatefulSet, currentRevision, updateRevision string,
+func newVersionedStatefulSetPod(currentSet, updateSet *appsv1beta1.StatefulSet, currentRevision, updateRevision string,
 	ordinal int, replicas []*v1.Pod,
 ) *v1.Pod {
 	if isCurrentRevisionNeeded(currentSet, updateRevision, ordinal, replicas) {
@@ -254,7 +289,7 @@ func newVersionedStatefulSetPod(currentSet, updateSet *appsv1alpha1.StatefulSet,
 }
 
 // isCurrentRevisionNeeded calculate if the 'ordinal' Pod should be current revision.
-func isCurrentRevisionNeeded(set *appsv1alpha1.StatefulSet, updateRevision string, ordinal int, replicas []*v1.Pod) bool {
+func isCurrentRevisionNeeded(set *appsv1beta1.StatefulSet, updateRevision string, ordinal int, replicas []*v1.Pod) bool {
 	if set.Spec.UpdateStrategy.Type != apps.RollingUpdateStatefulSetStrategyType {
 		return false
 	}
@@ -278,7 +313,7 @@ func isCurrentRevisionNeeded(set *appsv1alpha1.StatefulSet, updateRevision strin
 }
 
 // Match check if the given StatefulSet's template matches the template stored in the given history.
-func Match(ss *appsv1alpha1.StatefulSet, history *apps.ControllerRevision) (bool, error) {
+func Match(ss *appsv1beta1.StatefulSet, history *apps.ControllerRevision) (bool, error) {
 	patch, err := getPatch(ss)
 	if err != nil {
 		return false, err
@@ -290,13 +325,16 @@ func Match(ss *appsv1alpha1.StatefulSet, history *apps.ControllerRevision) (bool
 // previous version. If the returned error is nil the patch is valid. The current state that we save is just the
 // PodSpecTemplate. We can modify this later to encompass more state (or less) and remain compatible with previously
 // recorded patches.
-func getPatch(set *appsv1alpha1.StatefulSet) ([]byte, error) {
+func getPatch(set *appsv1beta1.StatefulSet) ([]byte, error) {
 	str, err := runtime.Encode(patchCodec, set)
 	if err != nil {
 		return nil, err
 	}
 	var raw map[string]interface{}
-	json.Unmarshal([]byte(str), &raw)
+	err = json.Unmarshal(str, &raw)
+	if err != nil {
+		return nil, err
+	}
 	objCopy := make(map[string]interface{})
 	specCopy := make(map[string]interface{})
 	spec := raw["spec"].(map[string]interface{})
@@ -312,7 +350,7 @@ func getPatch(set *appsv1alpha1.StatefulSet) ([]byte, error) {
 // The Revision of the returned ControllerRevision is set to revision. If the returned error is nil, the returned
 // ControllerRevision is valid. StatefulSet revisions are stored as patches that re-apply the current state of set
 // to a new StatefulSet using a strategic merge patch to replace the saved state of the new StatefulSet.
-func newRevision(set *appsv1alpha1.StatefulSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
+func newRevision(set *appsv1beta1.StatefulSet, revision int64, collisionCount *int32) (*apps.ControllerRevision, error) {
 	patch, err := getPatch(set)
 	if err != nil {
 		return nil, err
@@ -337,13 +375,13 @@ func newRevision(set *appsv1alpha1.StatefulSet, revision int64, collisionCount *
 
 // ApplyRevision returns a new StatefulSet constructed by restoring the state in revision to set. If the returned error
 // is nil, the returned StatefulSet is valid.
-func ApplyRevision(set *appsv1alpha1.StatefulSet, revision *apps.ControllerRevision) (*appsv1alpha1.StatefulSet, error) {
+func ApplyRevision(set *appsv1beta1.StatefulSet, revision *apps.ControllerRevision) (*appsv1beta1.StatefulSet, error) {
 	clone := set.DeepCopy()
 	patched, err := strategicpatch.StrategicMergePatch([]byte(runtime.EncodeOrDie(patchCodec, clone)), revision.Data.Raw, clone)
 	if err != nil {
 		return nil, err
 	}
-	restoredSet := &appsv1alpha1.StatefulSet{}
+	restoredSet := &appsv1beta1.StatefulSet{}
 	err = json.Unmarshal(patched, restoredSet)
 	if err != nil {
 		return nil, err
@@ -364,11 +402,12 @@ func nextRevision(revisions []*apps.ControllerRevision) int64 {
 
 // inconsistentStatus returns true if the ObservedGeneration of status is greater than set's
 // Generation or if any of the status's fields do not match those of set's status.
-func inconsistentStatus(set *appsv1alpha1.StatefulSet, status *appsv1alpha1.StatefulSetStatus) bool {
+func inconsistentStatus(set *appsv1beta1.StatefulSet, status *appsv1beta1.StatefulSetStatus) bool {
 	return status.ObservedGeneration > set.Status.ObservedGeneration ||
 		status.Replicas != set.Status.Replicas ||
 		status.CurrentReplicas != set.Status.CurrentReplicas ||
 		status.ReadyReplicas != set.Status.ReadyReplicas ||
+		status.AvailableReplicas != set.Status.AvailableReplicas ||
 		status.UpdatedReplicas != set.Status.UpdatedReplicas ||
 		status.CurrentRevision != set.Status.CurrentRevision ||
 		status.UpdateRevision != set.Status.UpdateRevision ||
@@ -379,7 +418,7 @@ func inconsistentStatus(set *appsv1alpha1.StatefulSet, status *appsv1alpha1.Stat
 // to the updateRevision. status's currentRevision is set to updateRevision and its' updateRevision
 // is set to the empty string. status's currentReplicas is set to updateReplicas and its updateReplicas
 // are set to 0.
-func completeRollingUpdate(set *appsv1alpha1.StatefulSet, status *appsv1alpha1.StatefulSetStatus) {
+func completeRollingUpdate(set *appsv1beta1.StatefulSet, status *appsv1beta1.StatefulSetStatus) {
 	if set.Spec.UpdateStrategy.Type == apps.RollingUpdateStatefulSetStrategyType &&
 		status.UpdatedReplicas == status.Replicas &&
 		status.ReadyReplicas == status.Replicas {
@@ -417,7 +456,7 @@ func NewStatefulsetCondition(conditionType apps.StatefulSetConditionType, condit
 }
 
 // GetStatefulsetConditition returns the condition with the provided type.
-func GetStatefulsetConditition(status appsv1alpha1.StatefulSetStatus, condType apps.StatefulSetConditionType) *apps.StatefulSetCondition {
+func GetStatefulsetConditition(status appsv1beta1.StatefulSetStatus, condType apps.StatefulSetConditionType) *apps.StatefulSetCondition {
 	for i := range status.Conditions {
 		c := status.Conditions[i]
 		if c.Type == condType {
@@ -428,7 +467,7 @@ func GetStatefulsetConditition(status appsv1alpha1.StatefulSetStatus, condType a
 }
 
 // SetStatefulsetCondition updates the statefulset to include the provided condition. If the condition that
-func SetStatefulsetCondition(status *appsv1alpha1.StatefulSetStatus, condition apps.StatefulSetCondition) {
+func SetStatefulsetCondition(status *appsv1beta1.StatefulSetStatus, condition apps.StatefulSetCondition) {
 	currentCond := GetStatefulsetConditition(*status, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason {
 		return
@@ -442,21 +481,21 @@ func SetStatefulsetCondition(status *appsv1alpha1.StatefulSetStatus, condition a
 }
 
 func filterOutCondition(conditions []apps.StatefulSetCondition, condType apps.StatefulSetConditionType) []apps.StatefulSetCondition {
-	var newCondtitions []apps.StatefulSetCondition
+	var newCondititions []apps.StatefulSetCondition
 	for _, c := range conditions {
 		if c.Type == condType {
 			continue
 		}
-		newCondtitions = append(newCondtitions, c)
+		newCondititions = append(newCondititions, c)
 	}
-	return newCondtitions
+	return newCondititions
 }
 
 func getStatefulSetKey(o metav1.Object) string {
 	return o.GetNamespace() + "/" + o.GetName()
 }
 
-func isInPlaceOnly(set *appsv1alpha1.StatefulSet) bool {
+func isInPlaceOnly(set *appsv1beta1.StatefulSet) bool {
 	return set.Spec.UpdateStrategy.RollingUpdate != nil &&
-		set.Spec.UpdateStrategy.RollingUpdate.PodUpdatePolicy == appsv1alpha1.InPlaceOnlyPodUpdateStrategyType
+		set.Spec.UpdateStrategy.RollingUpdate.PodUpdatePolicy == appsv1beta1.InPlaceOnlyPodUpdateStrategyType
 }

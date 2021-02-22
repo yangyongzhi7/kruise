@@ -3,7 +3,10 @@ package scale
 import (
 	"sort"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appspub "github.com/openkruise/kruise/apis/apps/pub"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util/lifecycle"
+	"github.com/openkruise/kruise/pkg/util/specifieddelete"
 	v1 "k8s.io/api/core/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -13,15 +16,30 @@ import (
 	"k8s.io/utils/integer"
 )
 
-func getPodsToDelete(cs *appsv1alpha1.CloneSet, pods []*v1.Pod) []*v1.Pod {
-	var podsToDelete []*v1.Pod
-	s := sets.NewString(cs.Spec.ScaleStrategy.PodsToDelete...)
-	for _, p := range pods {
-		if s.Has(p.Name) {
-			podsToDelete = append(podsToDelete, p)
+func isPodSpecifiedDelete(cs *appsv1alpha1.CloneSet, pod *v1.Pod) bool {
+	if specifieddelete.IsSpecifiedDelete(pod) {
+		return true
+	}
+	for _, name := range cs.Spec.ScaleStrategy.PodsToDelete {
+		if name == pod.Name {
+			return true
 		}
 	}
-	return podsToDelete
+	return false
+}
+
+func getPlannedDeletedPods(cs *appsv1alpha1.CloneSet, pods []*v1.Pod) ([]*v1.Pod, []*v1.Pod) {
+	var podsSpecifiedToDelete []*v1.Pod
+	var podsInPreDelete []*v1.Pod
+	for _, pod := range pods {
+		if isPodSpecifiedDelete(cs, pod) {
+			podsSpecifiedToDelete = append(podsSpecifiedToDelete, pod)
+		}
+		if lifecycle.GetPodLifecycleState(pod) == appspub.LifecycleStatePreparingDelete {
+			podsInPreDelete = append(podsInPreDelete, pod)
+		}
+	}
+	return podsSpecifiedToDelete, podsInPreDelete
 }
 
 // Get available IDs, if the a PVC exists but the corresponding pod does not exist, then reusing the ID, i.e., reuse the pvc.
@@ -72,7 +90,8 @@ func calculateDiffs(cs *appsv1alpha1.CloneSet, revConsistent bool, totalPods int
 
 	if !revConsistent {
 		if cs.Spec.UpdateStrategy.Partition != nil {
-			currentRevDiff = notUpdatedPods - integer.IntMin(int(*cs.Spec.UpdateStrategy.Partition), int(*cs.Spec.Replicas))
+			partition, _ := intstrutil.GetValueFromIntOrPercent(cs.Spec.UpdateStrategy.Partition, int(*cs.Spec.Replicas), true)
+			currentRevDiff = notUpdatedPods - integer.IntMin(partition, int(*cs.Spec.Replicas))
 		}
 
 		// Use maxSurge only if partition has not satisfied

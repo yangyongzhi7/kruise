@@ -25,10 +25,12 @@ import (
 	"time"
 
 	"github.com/onsi/gomega"
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/client"
 	kruisefake "github.com/openkruise/kruise/pkg/client/clientset/versioned/fake"
 	kruiseinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions"
 	kruiseappsinformers "github.com/openkruise/kruise/pkg/client/informers/externalversions/apps/v1alpha1"
+	"github.com/openkruise/kruise/pkg/util"
 	apps "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -280,14 +282,15 @@ func TestReconcile(t *testing.T) {
 	// channel when it is finished.
 	mgr, err := manager.New(cfg, manager.Options{})
 	g.Expect(err).NotTo(gomega.HaveOccurred())
-	c = mgr.GetClient()
+	c = util.NewClientFromManager(mgr, "test-daemonset-controller")
+	err = client.NewRegistry(mgr.GetConfig())
+	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	set := newDaemonSet("test")
 
-	dsc, _, _, err := newTestController(c, &appsv1alpha1.DaemonSet{})
-	if err != nil {
-		t.Errorf("failed to turn up DaemonSet : %s", err)
-	}
+	_, _, _, err = newTestController(c)
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+	dsc, err := newReconciler(mgr)
 	g.Expect(err).NotTo(gomega.HaveOccurred())
 
 	recFn, requests := SetupTestReconcile(dsc)
@@ -305,6 +308,12 @@ func TestReconcile(t *testing.T) {
 		t.Errorf("create DaemonSet %s failed: %s", set.Name, err)
 	}
 	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	time.Sleep(time.Second * 2)
+	foo := &appsv1alpha1.DaemonSet{}
+	if err = c.Get(context.TODO(), types.NamespacedName{Namespace: set.Namespace, Name: set.Name}, foo); err != nil {
+		g.Expect(err).NotTo(gomega.HaveOccurred())
+	}
 
 	err = c.Delete(context.TODO(), set)
 	if err != nil {

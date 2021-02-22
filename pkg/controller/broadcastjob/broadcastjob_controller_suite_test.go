@@ -20,7 +20,7 @@ package broadcastjob
 
 /*func TestMain(m *testing.M) {
 	//t := &envtest.Environment{
-	//	CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crds")},
+	//	CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 	//}
 	//apis.AddToScheme(scheme.Scheme)
 	//
@@ -58,7 +58,7 @@ func StartTestManager(mgr manager.Manager, g *gomega.GomegaWithT) (chan struct{}
 	return stop, wg
 }
 
-var c client.Client
+var c reader.Client
 
 var expectedRequest = reconcile.Request{NamespacedName: types.NamespacedName{Name: "foo", Namespace: "default"}}
 var depKey = types.NamespacedName{Name: "foo-deployment", Namespace: "default"}

@@ -21,7 +21,7 @@ import (
 	"reflect"
 	"strings"
 
-	appsv1alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	appsv1alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	clonesetutils "github.com/openkruise/kruise/pkg/controller/cloneset/utils"
 	"github.com/openkruise/kruise/pkg/util/expectations"
 	v1 "k8s.io/api/core/v1"
@@ -54,12 +54,12 @@ func (e *podEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimiting
 
 	// If it has a ControllerRef, that's all that matters.
 	if controllerRef := metav1.GetControllerOf(pod); controllerRef != nil {
-		req := resoleControllerRef(pod.Namespace, controllerRef)
+		req := resolveControllerRef(pod.Namespace, controllerRef)
 		if req == nil {
 			return
 		}
 		klog.V(4).Infof("Pod %s/%s created, owner: %s", pod.Namespace, pod.Name, req.Name)
-		scaleExpectations.ObserveScale(req.String(), expectations.Create, pod.Name)
+		clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Create, pod.Name)
 		q.Add(*req)
 		return
 	}
@@ -89,6 +89,7 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 		// Two different versions of the same pod will always have different RVs.
 		return
 	}
+	clonesetutils.ResourceVersionExpectations.Observe(curPod)
 
 	labelChanged := !reflect.DeepEqual(curPod.Labels, oldPod.Labels)
 	if curPod.DeletionTimestamp != nil {
@@ -110,14 +111,14 @@ func (e *podEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 	controllerRefChanged := !reflect.DeepEqual(curControllerRef, oldControllerRef)
 	if controllerRefChanged && oldControllerRef != nil {
 		// The ControllerRef was changed. Sync the old controller, if any.
-		if req := resoleControllerRef(oldPod.Namespace, oldControllerRef); req != nil {
+		if req := resolveControllerRef(oldPod.Namespace, oldControllerRef); req != nil {
 			q.Add(*req)
 		}
 	}
 
 	// If it has a ControllerRef, that's all that matters.
 	if curControllerRef != nil {
-		req := resoleControllerRef(curPod.Namespace, curControllerRef)
+		req := resolveControllerRef(curPod.Namespace, curControllerRef)
 		if req == nil {
 			return
 		}
@@ -150,19 +151,21 @@ func (e *podEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimiting
 		klog.Errorf("DeleteEvent parse pod failed, DeleteStateUnknown: %#v, obj: %#v", evt.DeleteStateUnknown, evt.Object)
 		return
 	}
+	clonesetutils.ResourceVersionExpectations.Delete(pod)
 
 	controllerRef := metav1.GetControllerOf(pod)
 	if controllerRef == nil {
 		// No controller should care about orphans being deleted.
 		return
 	}
-	req := resoleControllerRef(pod.Namespace, controllerRef)
+	req := resolveControllerRef(pod.Namespace, controllerRef)
 	if req == nil {
 		return
 	}
 
 	klog.V(4).Infof("Pod %s/%s deleted, owner: %s", pod.Namespace, pod.Name, req.Name)
-	scaleExpectations.ObserveScale(req.String(), expectations.Delete, pod.Name)
+	clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Delete, pod.Name)
+	clonesetutils.UpdateExpectations.DeleteObject(req.String(), pod)
 	q.Add(*req)
 }
 
@@ -170,7 +173,7 @@ func (e *podEventHandler) Generic(evt event.GenericEvent, q workqueue.RateLimiti
 
 }
 
-func resoleControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
+func resolveControllerRef(namespace string, controllerRef *metav1.OwnerReference) *reconcile.Request {
 	// Parse the Group out of the OwnerReference to compare it to what was parsed out of the requested OwnerType
 	refGV, err := schema.ParseGroupVersion(controllerRef.APIVersion)
 	if err != nil {
@@ -195,7 +198,7 @@ func resoleControllerRef(namespace string, controllerRef *metav1.OwnerReference)
 
 func (e *podEventHandler) getPodCloneSets(pod *v1.Pod) []appsv1alpha1.CloneSet {
 	csList := appsv1alpha1.CloneSetList{}
-	if err := e.List(context.TODO(), client.InNamespace(pod.Namespace), &csList); err != nil {
+	if err := e.List(context.TODO(), &csList, client.InNamespace(pod.Namespace)); err != nil {
 		return nil
 	}
 
@@ -239,8 +242,8 @@ func (e *pvcEventHandler) Create(evt event.CreateEvent, q workqueue.RateLimiting
 	}
 
 	if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
-		if req := resoleControllerRef(pvc.Namespace, controllerRef); req != nil {
-			scaleExpectations.ObserveScale(req.String(), expectations.Create, pvc.Name)
+		if req := resolveControllerRef(pvc.Namespace, controllerRef); req != nil {
+			clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Create, pvc.Name)
 			q.Add(*req)
 		}
 	}
@@ -251,7 +254,6 @@ func (e *pvcEventHandler) Update(evt event.UpdateEvent, q workqueue.RateLimiting
 	if pvc.DeletionTimestamp != nil {
 		e.Delete(event.DeleteEvent{Meta: evt.MetaNew, Object: evt.ObjectNew}, q)
 	}
-	return
 }
 
 func (e *pvcEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimitingInterface) {
@@ -262,8 +264,8 @@ func (e *pvcEventHandler) Delete(evt event.DeleteEvent, q workqueue.RateLimiting
 	}
 
 	if controllerRef := metav1.GetControllerOf(pvc); controllerRef != nil {
-		if req := resoleControllerRef(pvc.Namespace, controllerRef); req != nil {
-			scaleExpectations.ObserveScale(req.String(), expectations.Delete, pvc.Name)
+		if req := resolveControllerRef(pvc.Namespace, controllerRef); req != nil {
+			clonesetutils.ScaleExpectations.ObserveScale(req.String(), expectations.Delete, pvc.Name)
 			q.Add(*req)
 		}
 	}

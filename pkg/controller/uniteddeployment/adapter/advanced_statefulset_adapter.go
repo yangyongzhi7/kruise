@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	alpha1 "github.com/openkruise/kruise/pkg/apis/apps/v1alpha1"
+	alpha1 "github.com/openkruise/kruise/apis/apps/v1alpha1"
 	"github.com/openkruise/kruise/pkg/util/refmanager"
 )
 
@@ -183,7 +183,7 @@ func (a *AdvancedStatefulSetAdapter) PostUpdate(ud *alpha1.UnitedDeployment, obj
 // IsExpected checks the subset is the expected revision or not.
 // The revision label can tell the current subset revision.
 func (a *AdvancedStatefulSetAdapter) IsExpected(obj metav1.Object, revision string) bool {
-	return obj.GetLabels()[appsv1.ControllerRevisionHashLabelKey] != revision
+	return obj.GetLabels()[alpha1.ControllerRevisionHashLabelKey] != revision
 }
 
 func (a *AdvancedStatefulSetAdapter) getStatefulSetPods(set *alpha1.StatefulSet) ([]*corev1.Pod, error) {
@@ -192,7 +192,7 @@ func (a *AdvancedStatefulSetAdapter) getStatefulSetPods(set *alpha1.StatefulSet)
 		return nil, err
 	}
 	podList := &corev1.PodList{}
-	err = a.Client.List(context.TODO(), &client.ListOptions{LabelSelector: selector}, podList)
+	err = a.Client.List(context.TODO(), podList, &client.ListOptions{LabelSelector: selector})
 	if err != nil {
 		return nil, err
 	}

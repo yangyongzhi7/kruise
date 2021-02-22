@@ -30,14 +30,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
-	"github.com/openkruise/kruise/pkg/apis"
+	"github.com/openkruise/kruise/apis"
 )
 
 var cfg *rest.Config
 
 func TestMain(m *testing.M) {
 	t := &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crds")},
+		CRDDirectoryPaths: []string{filepath.Join("..", "..", "..", "config", "crd", "bases")},
 	}
 	apis.AddToScheme(scheme.Scheme)
 
@@ -67,10 +67,10 @@ func SetupTestReconcile(inner reconcile.Reconciler) (reconcile.Reconciler, chan 
 func StartTestManager(mgr manager.Manager, g *gomega.GomegaWithT) (chan struct{}, *sync.WaitGroup) {
 	stop := make(chan struct{})
 	wg := &sync.WaitGroup{}
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
+		defer wg.Done()
 		g.Expect(mgr.Start(stop)).NotTo(gomega.HaveOccurred())
-		wg.Done()
 	}()
 	return stop, wg
 }
